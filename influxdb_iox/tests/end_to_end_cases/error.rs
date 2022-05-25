@@ -46,11 +46,14 @@ pub async fn test_panic() {
 async fn assert_panic_logging(connection: Connection, log_path: Box<Path>) {
     // trigger panic
     let mut client = influxdb_iox_client::test::Client::new(connection);
-    let err = client.error().await.unwrap_err();
+    let err = client
+        .error(influxdb_iox_client::test::ErrorType::Panic)
+        .await
+        .unwrap_err();
     if let influxdb_iox_client::error::Error::Internal(err) = err {
         assert_eq!(&err.message, "This is a test panic");
     } else {
-        panic!("wrong error type");
+        panic!("wrong error type: {err}");
     }
 
     // check logs

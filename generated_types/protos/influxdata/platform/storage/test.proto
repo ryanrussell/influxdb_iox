@@ -3,8 +3,22 @@
 syntax = "proto3";
 package influxdata.platform.storage;
 
+// In which way the system shall error.
+enum ErrorType {
+  // Unspecified status, will use "panic".
+  ERROR_TYPE_UNSPECIFIED = 0;
+
+  // Panic.
+  ERROR_TYPE_PANIC = 1;
+
+  // Segfault.
+  ERROR_TYPE_SEGFAULT = 2;
+}
+
 // Send a message that will generate an internal error (used for testing)
 message TestErrorRequest {
+  // How to fail.
+  ErrorType error_type = 1;
 }
 
 message TestErrorResponse {

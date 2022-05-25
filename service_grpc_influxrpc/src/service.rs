@@ -2317,7 +2317,9 @@ mod tests {
         // Start a test gRPC server on a randomally allocated port
         let mut fixture = Fixture::new().await.expect("Connecting to test server");
 
-        let request = TestErrorRequest {};
+        let request = TestErrorRequest {
+            error_type: ErrorType::Panic.into(),
+        };
 
         // Test response from storage server
         let response = fixture.iox_client.test_error(request).await;
@@ -2337,14 +2339,16 @@ mod tests {
         // Note we don't include the actual line / column in the
         // expected panic message to avoid needing to update the test
         // whenever the source code file changed.
-        let expected_error = "'This is a test panic', service_grpc_testing/src/lib.rs:18:9";
+        let expected_error = "'This is a test panic', service_grpc_testing/src/lib.rs:21:17";
         assert_contains!(captured_logs, expected_error);
 
         // Ensure that panics don't exhaust the tokio executor by
         // running 100 times (success is if we can make a successful
         // call after this)
         for _ in 0usize..100 {
-            let request = TestErrorRequest {};
+            let request = TestErrorRequest {
+                error_type: ErrorType::Panic.into(),
+            };
 
             // Test response from storage server
             let response = fixture.iox_client.test_error(request).await;

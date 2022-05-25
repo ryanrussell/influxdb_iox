@@ -1,5 +1,7 @@
 /// Re-export generated_types
-use generated_types::{i_ox_testing_client::IOxTestingClient, TestErrorRequest};
+use generated_types::{
+    i_ox_testing_client::IOxTestingClient, ErrorType as ProtoErrorType, TestErrorRequest,
+};
 
 use crate::connection::Connection;
 use crate::error::Error;
@@ -10,7 +12,7 @@ use crate::error::Error;
 /// #[tokio::main]
 /// # async fn main() {
 /// use influxdb_iox_client::{
-///     test::Client,
+///     test::{Client, ErrorType},
 ///     connection::Builder,
 /// };
 ///
@@ -21,9 +23,9 @@ use crate::error::Error;
 ///
 /// let mut client = Client::new(connection);
 ///
-/// // trigger an error
+/// // trigger a panic
 /// client
-///     .error()
+///     .error(ErrorType::Panic)
 ///     .await
 ///     .expect("failed to trigger an error");
 /// # }
@@ -42,9 +44,31 @@ impl Client {
     }
 
     /// Trigger an error.
-    pub async fn error(&mut self) -> Result<(), Error> {
-        let request = TestErrorRequest {};
+    pub async fn error(&mut self, error_type: ErrorType) -> Result<(), Error> {
+        let error_type: ProtoErrorType = error_type.into();
+        let request = TestErrorRequest {
+            error_type: error_type.into(),
+        };
         self.inner.test_error(request).await?;
         Ok(())
+    }
+}
+
+/// Describes how IOx should error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorType {
+    /// Panics.
+    Panic,
+
+    /// Segfaults.
+    Segfault,
+}
+
+impl From<ErrorType> for ProtoErrorType {
+    fn from(t: ErrorType) -> Self {
+        match t {
+            ErrorType::Panic => ProtoErrorType::Panic,
+            ErrorType::Segfault => ProtoErrorType::Segfault,
+        }
     }
 }
