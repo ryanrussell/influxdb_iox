@@ -520,7 +520,7 @@ unsafe impl CrashEvent for CrashEventImpl {
         // https://github.com/rust-lang/backtrace-rs/pull/265#discussion_r352654555 ) be done by an ordinary thread.
         eprintln!("!!! CRASH REPORT START !!!",);
 
-        eprintln!("Signal: {}", context.siginfo.ssi_signo,);
+        print_signal(context);
 
         if let Some(name) = std::thread::current().name() {
             eprintln!("Thread: {}", name);
@@ -562,6 +562,19 @@ unsafe impl CrashEvent for CrashEventImpl {
         crash_handler::CrashEventResult::Handled(false)
     }
 }
+
+#[cfg(target_os = "linux")]
+fn print_signal(context: &crash_handler::CrashContext) {
+    eprintln!("Signal: {}", context.siginfo.ssi_signo);
+}
+
+#[cfg(target_os = "macos")]
+fn print_signal(context: &crash_handler::CrashContext) {
+    eprintln!("Exception: {:?}", context.exception);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn print_signal(context: &crash_handler::CrashContext) {}
 
 /// A ':' separated key value pair
 #[derive(Debug, Clone)]
