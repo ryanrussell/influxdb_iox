@@ -13,16 +13,26 @@ use crate::commands::{
     run::all_in_one,
     tracing::{init_logs_and_tracing, init_simple_logs, TroggingGuard},
 };
+use crash_handler::{CrashEvent, CrashHandler};
 use dotenv::dotenv;
 use influxdb_iox_client::connection::Builder;
 use iox_time::{SystemProvider, TimeProvider};
 use observability_deps::tracing::warn;
-use once_cell::sync::Lazy;
-use std::time::Duration;
+use once_cell::sync::{Lazy, OnceCell};
+use parking_lot::Mutex;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     str::FromStr,
+};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{sync_channel, SyncSender},
+        Arc,
+    },
+    thread::JoinHandle,
+    time::Duration,
 };
 use tokio::runtime::Runtime;
 
@@ -371,50 +381,185 @@ fn load_dotenv() {
     };
 }
 
-// Based on ideas from
-// https://github.com/servo/servo/blob/f03ddf6c6c6e94e799ab2a3a89660aea4a01da6f/ports/servo/main.rs#L58-L79
+static CRASH_HANDLER: OnceCell<CrashHandler> = OnceCell::new();
+
 fn install_crash_handler() {
-    unsafe {
-        set_signal_handler(libc::SIGSEGV, signal_handler); // handle segfaults
-        set_signal_handler(libc::SIGILL, signal_handler); // handle stack overflow and unsupported CPUs
-        set_signal_handler(libc::SIGBUS, signal_handler); // handle invalid memory access
+    // ignore error because it is OK to install the handler twice
+    if let Ok(handler) = CrashHandler::attach(Box::new(CrashEventImpl::new())) {
+        CRASH_HANDLER.set(handler).ok();
+    } else {
+        assert!(
+            CRASH_HANDLER.get().is_some(),
+            "Cannot install crash handler"
+        );
     }
 }
 
-unsafe extern "C" fn signal_handler(sig: i32) {
-    use backtrace::Backtrace;
-    use std::process::abort;
-    let name = std::thread::current()
-        .name()
-        .map(|n| format!(" for thread \"{}\"", n))
-        .unwrap_or_else(|| "".to_owned());
-    eprintln!(
-        "Signal {}, Stack trace{}\n{:?}",
-        sig,
-        name,
-        Backtrace::new()
-    );
-    abort();
+enum CrashPrinterCmd {
+    Exit,
+    Print {
+        frame: backtrace::Frame,
+        frame_count: usize,
+    },
 }
 
-// based on https://github.com/adjivas/sig/blob/master/src/lib.rs#L34-L52
-unsafe fn set_signal_handler(signal: libc::c_int, handler: unsafe extern "C" fn(libc::c_int)) {
-    use libc::{sigaction, sigfillset, sighandler_t};
-    let mut sigset = std::mem::zeroed();
+struct CrashEventImpl {
+    /// Join handle for printer thread.
+    handle: Option<JoinHandle<()>>,
 
-    // Block all signals during the handler. This is the expected behavior, but
-    // it's not guaranteed by `signal()`.
-    if sigfillset(&mut sigset) != -1 {
-        // Done because sigaction has private members.
-        // This is safe because sa_restorer and sa_handlers are pointers that
-        // might be null (that is, zero).
-        let mut action: sigaction = std::mem::zeroed();
+    /// Channel to send commands to the printer thread as well as and ID counter.
+    ///
+    /// They are behind the same mutex to avoid reordering between "picking an ID" and "sending the message".
+    ///
+    /// The channel is bound and sending data should not allocate.
+    tx_and_counter: Mutex<(SyncSender<CrashPrinterCmd>, u64)>,
 
-        // action.sa_flags = 0;
-        action.sa_mask = sigset;
-        action.sa_sigaction = handler as sighandler_t;
+    /// Counter of which message is done.
+    done: Arc<AtomicU64>,
 
-        sigaction(signal, &action, std::ptr::null_mut());
+    /// Mutex that avoids that we try to handle and print out two signals at the same time.
+    currently_handles_signal: Mutex<()>,
+}
+
+impl CrashEventImpl {
+    fn new() -> Self {
+        let (tx, rx) = sync_channel(1);
+        let done = Arc::new(AtomicU64::new(0));
+        let done_captured = Arc::clone(&done);
+        let handle = std::thread::spawn(move || {
+            // While we avoid allocations in this thread as good as possible, `backtrace` may always allocate when
+            // resolving symbols, so we cannot do much about i.t
+            loop {
+                let cmd = match rx.recv() {
+                    Ok(cmd) => cmd,
+                    Err(_) => {
+                        // sender is gone => exit
+                        return;
+                    }
+                };
+
+                match cmd {
+                    CrashPrinterCmd::Exit => {
+                        return;
+                    }
+                    CrashPrinterCmd::Print { frame, frame_count } => {
+                        let ip = frame.ip();
+                        let symbol_address = frame.symbol_address();
+
+                        eprintln!("  {} ({:p}):  ", frame_count, ip);
+
+                        // Resolve this instruction pointer to a symbol name(s) (there can be multiple!)
+                        // must use the unsync version because the sync version deadlocks
+                        unsafe {
+                            backtrace::resolve_frame_unsynchronized(&frame, |symbol| {
+                                eprint!("      ");
+                                if let Some(name) = symbol.name() {
+                                    eprint!("{}", name)
+                                } else {
+                                    eprint!("<unresolved>");
+                                }
+
+                                eprintln!("({:p})", symbol_address);
+
+                                eprint!("        at ");
+                                if let Some(filename) = symbol.filename() {
+                                    eprint!("{}", filename.to_string_lossy());
+                                } else {
+                                    eprint!("<unknown>");
+                                }
+                                eprint!(":");
+                                if let Some(lineno) = symbol.lineno() {
+                                    eprint!("{}", lineno);
+                                } else {
+                                    eprint!("<unknown>");
+                                }
+                                eprint!(":");
+                                if let Some(colno) = symbol.colno() {
+                                    eprint!("{}", colno);
+                                } else {
+                                    eprint!("<unknown>");
+                                }
+                                eprintln!();
+                            })
+                        };
+
+                        done_captured.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+
+        let tx_and_counter = Mutex::new((tx, 0));
+
+        Self {
+            handle: Some(handle),
+            tx_and_counter,
+            done,
+            currently_handles_signal: Mutex::new(()),
+        }
+    }
+}
+
+impl Drop for CrashEventImpl {
+    fn drop(&mut self) {
+        let guard = self.tx_and_counter.lock();
+        guard.0.send(CrashPrinterCmd::Exit).ok();
+
+        if let Some(handle) = self.handle.take() {
+            handle.join().ok();
+        }
+    }
+}
+
+unsafe impl CrashEvent for CrashEventImpl {
+    fn on_crash(&self, context: &crash_handler::CrashContext) -> crash_handler::CrashEventResult {
+        let _guard = self.currently_handles_signal.lock();
+
+        // We MUST do as little as possible in this context. Esp. we must avoid allocations. For that we only try to use
+        // stack-allocated data structures and let the actual stack frame printing (which allocates, see
+        // https://github.com/rust-lang/backtrace-rs/pull/265#discussion_r352654555 ) be done by an ordinary thread.
+        eprintln!("!!! CRASH REPORT START !!!",);
+
+        eprintln!("Signal: {}", context.siginfo.ssi_signo,);
+
+        if let Some(name) = std::thread::current().name() {
+            eprintln!("Thread: {}", name);
+        } else {
+            eprintln!("Thread: <unknown>");
+        }
+
+        eprintln!("Stack trace:\n",);
+        let mut frame_count = 0;
+        backtrace::trace(|frame| {
+            let id = {
+                let mut guard = self.tx_and_counter.lock();
+                let id = guard.1;
+                guard.1 += 1;
+                match guard.0.send(CrashPrinterCmd::Print {
+                    frame: frame.clone(),
+                    frame_count,
+                }) {
+                    Ok(()) => id,
+                    Err(_) => {
+                        eprintln!("  <cannot print>");
+                        return false;
+                    }
+                }
+            };
+
+            loop {
+                if self.done.load(Ordering::SeqCst) >= id {
+                    break;
+                }
+            }
+
+            frame_count += 1;
+            true // keep going to the next frame
+        });
+
+        eprintln!("!!! CRASH REPORT END !!!",);
+
+        crash_handler::CrashEventResult::Handled(false)
     }
 }
 

@@ -945,6 +945,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crash-context"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e214617c2dbaa4e11789c559b03f0fde853fe20dd684a4629806100554ade18"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "mach2",
+]
+
+[[package]]
+name = "crash-handler"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18d1ea4b2657f3cabe2e54a58f52bf2d87974115081d58ed9046b6577e2f9832"
+dependencies = [
+ "cfg-if",
+ "crash-context",
+ "libc",
+ "mach2",
+ "parking_lot 0.12.0",
+ "windows-sys 0.36.1",
+]
+
+[[package]]
 name = "crc"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2138,6 +2163,7 @@ dependencies = [
  "clap 3.1.18",
  "clap_blocks",
  "console-subscriber",
+ "crash-handler",
  "data_types",
  "datafusion 0.1.0",
  "dotenv",
@@ -2160,7 +2186,6 @@ dependencies = [
  "ioxd_router",
  "ioxd_test",
  "itertools",
- "libc",
  "metric",
  "num_cpus",
  "object_store",
@@ -2168,6 +2193,7 @@ dependencies = [
  "observability_deps",
  "once_cell",
  "panic_logging",
+ "parking_lot 0.12.0",
  "parquet_file",
  "predicate",
  "predicates",
@@ -2814,6 +2840,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7be8908e2ed6f31c02db8a9fa962f03e36c53fbfde437363eae3306b85d7e17"
 dependencies = [
  "cc",
+ "libc",
+]
+
+[[package]]
+name = "mach2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c29a677a8db77a45ddd1370ac4fbd5187f827780000202079e28949f1a75cb1"
+dependencies = [
  "libc",
 ]
 
