@@ -5,6 +5,7 @@ use observability_deps::tracing::info;
 use std::{
     fmt::Debug,
     fs::OpenOptions,
+    io::Write,
     path::Path,
     process::{Child, Command},
     str,
@@ -669,9 +670,9 @@ fn dump_log_to_stdout(server_type: ServerType, log_path: &Path) {
     let mut f = std::fs::File::open(log_path).expect("failed to open log file");
     let mut buffer = [0_u8; 8 * 1024];
 
-    info!("****************");
-    info!("Start {:?} TestServer Output", server_type);
-    info!("****************");
+    println!("****************");
+    println!("Start {:?} TestServer Output", server_type);
+    println!("****************");
 
     while let Ok(read) = f.read(&mut buffer) {
         if read == 0 {
@@ -680,16 +681,17 @@ fn dump_log_to_stdout(server_type: ServerType, log_path: &Path) {
         if let Ok(str) = std::str::from_utf8(&buffer[..read]) {
             print!("{}", str);
         } else {
-            info!(
+            println!(
                 "\n\n-- ERROR IN TRANSFER -- please see {:?} for raw contents ---\n\n",
                 log_path
             );
         }
     }
+    std::io::stdout().flush().ok();
 
-    info!("****************");
-    info!("End {:?} TestServer Output", server_type);
-    info!("****************");
+    println!("****************");
+    println!("End {:?} TestServer Output", server_type);
+    println!("****************");
 }
 
 /// Attempt to kill a child process politely.
