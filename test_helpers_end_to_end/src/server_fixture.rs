@@ -261,7 +261,8 @@ async fn grpc_channel(
     test_config: &TestConfig,
     client_base: &str,
 ) -> influxdb_iox_client::connection::Result<Connection> {
-    let builder = influxdb_iox_client::connection::Builder::default();
+    let builder =
+        influxdb_iox_client::connection::Builder::default().timeout(Duration::from_secs(1));
 
     info!("Creating gRPC channel to {}", client_base);
     test_config
