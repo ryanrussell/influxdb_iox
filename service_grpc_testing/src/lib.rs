@@ -29,9 +29,19 @@ impl IOxTesting for IOxTestingService {
     }
 }
 
+// Only support segfault kills in debug builds.
+//
+// The internet suggests that the only way to detect debug/release builds is the `debug_assertions` cfg state, so we'll
+// use that.
+#[cfg(debug_assertions)]
 fn segfault() -> ! {
     unsafe { std::ptr::null_mut::<i32>().write(42) };
     panic!("We should have segfaulted!");
+}
+
+#[cfg(not(debug_assertions))]
+fn segfault() -> ! {
+    panic!("Killing a process via segfault is NOT supported in release builds!");
 }
 
 pub fn make_server() -> IOxTestingServer<impl IOxTesting> {
