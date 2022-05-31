@@ -103,10 +103,8 @@ async fn test_decoded_iox_metadata() {
     );
 }
 
-// Reproducer for "https://github.com/influxdata/influxdb_iox/issues/4695"
-// TODO: remove #[ignore] to turn the test on after the fix
-#[ignore]
 #[tokio::test]
+#[should_panic]
 async fn test_decoded_iox_metadata_without_data() {
     // A representative IOx data sample (with a time column, an invariant upheld
     // in the IOx write path)
@@ -155,7 +153,7 @@ async fn test_decoded_iox_metadata_without_data() {
     let schema = decoded.read_schema().unwrap();
     decoded
         .read_statistics(&*schema)
-        .expect("Invalid Statistics"); // panic due to the bug
+        .expect("Invalid Statistics due to no metadata");
 }
 
 #[tokio::test]
