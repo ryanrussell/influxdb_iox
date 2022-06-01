@@ -965,7 +965,7 @@ dependencies = [
  "crash-context",
  "libc",
  "mach2",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.1",
  "windows-sys 0.36.1",
 ]
 
@@ -2193,7 +2193,7 @@ dependencies = [
  "observability_deps",
  "once_cell",
  "panic_logging",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.1",
  "parquet_file",
  "predicate",
  "predicates",
