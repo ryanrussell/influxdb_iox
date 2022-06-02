@@ -31,7 +31,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     convert::TryFrom,
-    sync::Arc,
+    sync::Arc, time::Duration,
 };
 use uuid::Uuid;
 use write_summary::SequencerProgress;
@@ -382,10 +382,11 @@ pub struct SequencerData {
     /// The kafka partition for this sequencer
     kafka_partition: KafkaPartition,
 
-    // New namespaces can come in at any time so we need to be able to add new ones
+    /// New namespaces can come in at any time so we need to be able to add new ones
     namespaces: RwLock<BTreeMap<String, Arc<NamespaceData>>>,
 
     metrics: Arc<metric::Registry>,
+
     namespace_count: U64Counter,
 }
 
@@ -509,6 +510,9 @@ pub struct NamespaceData {
     tables: RwLock<BTreeMap<String, Arc<tokio::sync::RwLock<TableData>>>>,
 
     table_count: U64Counter,
+
+    /// The progress this namespace has made
+    progress: RwLock<SequencerProgress>,
 }
 
 impl NamespaceData {
@@ -525,6 +529,7 @@ impl NamespaceData {
             namespace_id,
             tables: Default::default(),
             table_count,
+            progress: RwLock::new(SequencerProgress::new()),
         }
     }
 
@@ -538,6 +543,7 @@ impl NamespaceData {
             namespace_id,
             tables: RwLock::new(tables),
             table_count: Default::default(),
+            progress: RwLock::new(SequencerProgress::new()),
         }
     }
 
@@ -561,6 +567,31 @@ impl NamespaceData {
         let sequence_number = i64::try_from(sequence_number).expect("sequence out of bounds");
         let sequence_number = SequenceNumber::new(sequence_number);
 
+        // Buffer the operator,  don't return until we have updated the readable progress
+        let result = self.buffer_operation_impl(
+            dml_operation, sequence_number, sequencer_id, catalog, lifecycle_handle, partitioner, executor
+        ).await;
+
+        // Update readable progress
+        {
+            let mut progress = self.progress.write();
+            *progress = progress.clone().with_buffered(sequence_number);
+        }
+        result
+    }
+
+    /// Implementation of [`buffer_operation`]
+    pub async fn buffer_operation_impl(
+        &self,
+        dml_operation: DmlOperation,
+        sequence_number: SequenceNumber,
+        sequencer_id: SequencerId,
+        catalog: &dyn Catalog,
+        lifecycle_handle: &dyn LifecycleHandle,
+        partitioner: &dyn Partitioner,
+        executor: &Executor,
+    ) -> Result<bool> {
+
         match dml_operation {
             DmlOperation::Write(write) => {
                 let mut pause_writes = false;
@@ -570,6 +601,9 @@ impl NamespaceData {
                         Some(t) => t,
                         None => self.insert_table(sequencer_id, &t, catalog).await?,
                     };
+
+                    // TEMP: Inject a pause here to simulate slow writes
+                    tokio::time::sleep(Duration::from_millis(100)).await;
 
                     let mut table_data = table_data.write().await;
                     let should_pause = table_data
@@ -726,14 +760,7 @@ impl NamespaceData {
 
     /// Return progress from this Namespace
     async fn progress(&self) -> SequencerProgress {
-        let tables: Vec<_> = self.tables.read().values().map(Arc::clone).collect();
-
-        let mut progress = SequencerProgress::new();
-        for table_data in tables {
-            progress = progress.combine(table_data.read().await.progress())
-        }
-
-        progress
+        self.progress.read().clone()
     }
 }
 
@@ -769,15 +796,6 @@ impl TableData {
             tombstone_max_sequence_number,
             partition_data: partitions,
         }
-    }
-
-    /// Return parquet_max_sequence_number
-    pub fn parquet_max_sequence_number(&self) -> Option<SequenceNumber> {
-        self.partition_data
-            .values()
-            .map(|p| p.data.max_persisted_sequence_number)
-            .max()
-            .flatten()
     }
 
     /// Return tombstone_max_sequence_number
@@ -912,21 +930,6 @@ impl TableData {
         self.partition_data.insert(partition.partition_key, data);
 
         Ok(())
-    }
-
-    /// Return progress from this Table
-    fn progress(&self) -> SequencerProgress {
-        let progress = SequencerProgress::new();
-        let progress = match self.parquet_max_sequence_number() {
-            Some(n) => progress.with_persisted(n),
-            None => progress,
-        };
-
-        self.partition_data
-            .values()
-            .fold(progress, |progress, partition_data| {
-                progress.combine(partition_data.progress())
-            })
     }
 }
 
@@ -1087,11 +1090,6 @@ impl PartitionData {
         if let Some(snapshot) = snapshot {
             self.data.snapshots.push(snapshot);
         }
-    }
-
-    /// Return the progress from this Partition
-    fn progress(&self) -> SequencerProgress {
-        self.data.progress()
     }
 }
 
@@ -1280,33 +1278,6 @@ impl DataBuffer {
 
         Some(queryable_batch)
     }
-
-    /// Return the progress in this DataBuffer
-    fn progress(&self) -> SequencerProgress {
-        let progress = SequencerProgress::new();
-
-        let progress = if let Some(buffer) = &self.buffer {
-            progress.combine(buffer.progress())
-        } else {
-            progress
-        };
-
-        let progress = self.snapshots.iter().fold(progress, |progress, snapshot| {
-            progress.combine(snapshot.progress())
-        });
-
-        if let Some(persisting) = &self.persisting {
-            persisting
-                .data
-                .data
-                .iter()
-                .fold(progress, |progress, snapshot| {
-                    progress.combine(snapshot.progress())
-                })
-        } else {
-            progress
-        }
-    }
 }
 
 /// BufferBatch is a MutableBatch with its ingesting order, sequencer_number, that helps the
@@ -1319,15 +1290,6 @@ pub struct BufferBatch {
     pub(crate) max_sequence_number: SequenceNumber,
     /// Ingesting data
     pub(crate) data: MutableBatch,
-}
-
-impl BufferBatch {
-    /// Return the progress in this DataBuffer
-    fn progress(&self) -> SequencerProgress {
-        SequencerProgress::new()
-            .with_buffered(self.min_sequence_number)
-            .with_buffered(self.max_sequence_number)
-    }
 }
 
 /// SnapshotBatch contains data of many contiguous BufferBatches
@@ -1367,13 +1329,6 @@ impl SnapshotBatch {
                 }
             }
         })
-    }
-
-    /// Return progress in this data
-    fn progress(&self) -> SequencerProgress {
-        SequencerProgress::new()
-            .with_buffered(self.min_sequencer_number)
-            .with_buffered(self.max_sequencer_number)
     }
 }
 
@@ -1814,15 +1769,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(partition_info.partition.sort_key.unwrap(), "time");
-
-        let mem_table = n.table_data("mem").unwrap();
-        let mem_table = mem_table.read().await;
-
-        // verify that the parquet_max_sequence_number got updated
-        assert_eq!(
-            mem_table.parquet_max_sequence_number(),
-            Some(SequenceNumber::new(2))
-        );
 
         // check progresses after persist
         let progresses = data.progresses(vec![kafka_partition]).await;
