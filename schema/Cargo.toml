@@ -9,6 +9,8 @@ description = "IOx Schema definition"
 arrow = { version = "14.0.0", features = ["prettyprint"] }
 hashbrown = "0.12"
 indexmap = { version = "1.8", features = ["std"] }
+iox_regex = { path = "../iox_regex" }
 itertools = "0.10.1"
 snafu = "0.7"
 workspace-hack = { path = "../workspace-hack"}
+

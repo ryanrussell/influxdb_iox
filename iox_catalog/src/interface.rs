@@ -1438,6 +1438,22 @@ pub(crate) mod test_helpers {
             updated_other_partition.sort_key.unwrap(),
             "tag2,tag1,tag3,time"
         );
+
+        // test update sort keys with comma
+        let partition = repos
+            .partitions()
+            .update_sort_key(other_partition.id, r#"tag2,tag1,tag3,tag4\,whatever,time"#)
+            .await
+            .unwrap();
+
+        // String and should still have escape
+        assert_eq!(partition.sort_key, Some(r#"tag2,tag1,tag3,tag4\,whatever,time"#.to_string()));
+        // brought back to columns and should not include escapes
+        let sort_key = SortKey::from_columns(["tag2", "tag1", "tag3", "tag4,whatever", "time"]);
+        assert_eq!(partition.sort_key(), Some(sort_key));
+
+        println!("sort_key: {:#?}", partition.sort_key);
+        println!("sort_key(): {:#?}", partition.sort_key());
     }
 
     async fn test_tombstone(catalog: Arc<dyn Catalog>) {

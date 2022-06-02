@@ -327,7 +327,7 @@ impl Persister for IngesterData {
 
             // Update the sort key in the catalog if there are additional columns
             if let Some(new_sort_key) = sort_key_update {
-                let sort_key_string = new_sort_key.to_columns();
+                let sort_key_string = new_sort_key.to_columns_string();
                 Backoff::new(&self.backoff_config)
                     .retry_all_errors("update_sort_key", || async {
                         let mut repos = self.catalog.repositories().await;

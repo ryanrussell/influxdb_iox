@@ -19,8 +19,8 @@ use window::EncodedWindowDuration;
 /// Grouping by structs
 pub mod group_by;
 
-/// Regular Expressions
-mod regex;
+// /// Regular Expressions
+// mod regex;
 
 /// Flux selector expressions
 pub mod selectors;
@@ -39,7 +39,7 @@ mod registry;
 /// ```
 pub fn regex_match_expr(input: Expr, pattern: String) -> Expr {
     registry()
-        .udf(regex::REGEX_MATCH_UDF_NAME)
+        .udf(iox_regex::REGEX_MATCH_UDF_NAME)
         .expect("RegexMatch function not registered")
         .call(vec![input, lit(pattern)])
 }
@@ -52,7 +52,7 @@ pub fn regex_match_expr(input: Expr, pattern: String) -> Expr {
 /// ```
 pub fn regex_not_match_expr(input: Expr, pattern: String) -> Expr {
     registry()
-        .udf(regex::REGEX_NOT_MATCH_UDF_NAME)
+        .udf(iox_regex::REGEX_NOT_MATCH_UDF_NAME)
         .expect("NotRegexMatch function not registered")
         .call(vec![input, lit(pattern)])
 }
@@ -97,6 +97,15 @@ mod test {
     use std::sync::Arc;
 
     use super::*;
+
+    #[tokio::test]
+    async fn regex_match_expr_invalid_regex() {
+        // an invalid regex pattern
+        let regex_expr = crate::regex_match_expr(col("words"), "[".to_string());
+
+        let actual = iox_regex::run_plan(regex_expr).await.expect_err("expected error");
+        assert!(actual.to_string().contains("error compiling regex pattern"))
+    }
 
     /// plumbing test to validate registry is connected. functions are
     /// tested more thoroughly in their own modules

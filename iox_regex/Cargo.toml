@@ -1,22 +1,19 @@
 [package]
-name = "query_functions"
+name = "iox_regex"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 arrow = { version = "14.0.0", features = ["prettyprint"] }
-chrono = { version = "0.4", default-features = false }
+# chrono = { version = "0.4", default-features = false }
 datafusion = { path = "../datafusion" }
-iox_regex = { path = "../iox_regex" }
-itertools = "0.10.2"
+# itertools = "0.10.2"
 lazy_static = "1.4.0"
-observability_deps = { path = "../observability_deps" }
+# observability_deps = { path = "../observability_deps" }
 regex = "1"
 regex-syntax = "0.6.26"
-schema = { path = "../schema" }
-snafu = "0.7"
+# schema = { path = "../schema" }
+# snafu = "0.7"
 workspace-hack = { path = "../workspace-hack"}
 
 [dev-dependencies]

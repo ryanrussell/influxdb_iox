@@ -298,13 +298,17 @@ mod tests {
     use arrow::array::{ArrayRef, StringBuilder};
     use data_types::{NamespaceId, PartitionId, SequenceNumber, SequencerId, TableId};
     use iox_time::Time;
+    use schema::sort::SortKeyBuilder;
 
     #[tokio::test]
     async fn test_parquet_round_trip() {
         let object_store: Arc<DynObjectStore> = Arc::new(object_store::memory::InMemory::default());
 
         let store = ParquetStorage::new(object_store);
-
+        let sort_key = SortKeyBuilder::new()
+            .with_col("a, b") // comma in column name
+            .with_col("time")
+            .build();
         let meta = IoxMetadata {
             object_store_id: Default::default(),
             creation_timestamp: Time::from_timestamp_nanos(42),
@@ -318,7 +322,7 @@ mod tests {
             min_sequence_number: SequenceNumber::new(10),
             max_sequence_number: SequenceNumber::new(11),
             compaction_level: 1,
-            sort_key: None,
+            sort_key: Some(sort_key),
         };
         let batch = RecordBatch::try_from_iter([("a", to_string_array(&["value"]))]).unwrap();
         let schema = batch.schema();
@@ -339,6 +343,8 @@ mod tests {
         // Ensure the metadata in the file decodes to the same IOx metadata we
         // provided when uploading.
         assert_eq!(got_iox_meta, meta);
+        // ensure the comma in the column name
+        assert!(got_iox_meta.sort_key.unwrap().contains("a, b"));
 
         // Fetch the record batches and compare them to the input batches.
         let rx = store

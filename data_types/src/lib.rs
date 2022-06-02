@@ -682,7 +682,7 @@ impl Partition {
     pub fn sort_key(&self) -> Option<SortKey> {
         self.sort_key
             .as_ref()
-            .map(|s| SortKey::from_columns(s.split(',')))
+            .map(|s| SortKey::from_solumns_string_with_escape(s))
     }
 }
 
@@ -2568,7 +2568,7 @@ mod tests {
         assert_eq!(stat2.overlaps(&stat1), StatOverlap::NonZero);
 
         //    [--stat1--]
-        //        [--stat3--]
+        //        [--stat3--] 
         let stat3 = StatValues {
             min: Some(15),
             max: Some(25),
@@ -3130,5 +3130,24 @@ mod tests {
             tables: BTreeMap::from([(String::from("foo"), TableSchema::new(TableId::new(1)))]),
         };
         assert!(schema1.size() < schema2.size());
+    }
+
+    #[test]
+    fn test_partition() {
+        let partition = Partition {
+            id: PartitionId::new(1),
+            sequencer_id: SequencerId::new(1),
+            table_id: TableId::new(1),
+            partition_key: "whatever".to_string(),
+            sort_key: Some("a\\,b,c,d\\,".to_string()),
+        };
+
+        assert_eq!(partition.sort_key, Some("a\\,b,c,d\\,".to_string()));
+
+        // 3 columns without escapes
+        let sort_key = SortKey::from_columns(["a,b","c", "d,"]);
+        assert_eq!(partition.sort_key(), Some(sort_key));
+
+
     }
 }

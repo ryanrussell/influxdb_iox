@@ -6,6 +6,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use indexmap::{map::Iter, IndexMap};
+use iox_regex::clean_non_meta_escapes;
 use itertools::Itertools;
 use snafu::Snafu;
 use std::{
@@ -137,6 +138,27 @@ impl SortKey {
         }
     }
 
+    pub fn from_solumns_string_with_escape(cols_string: &str) -> Self {
+        let cols = Self::split_string_with_escape(cols_string, &[',']);
+        Self::from_columns_with_escape(cols)
+    } 
+
+    /// Create a new sort key from the provided columns that may include escapes
+    pub fn from_columns_with_escape<C, I>(columns: C) -> Self
+    where
+        C: IntoIterator<Item = I>,
+        I: Into<Arc<str>>,
+    {
+        let iter = columns.into_iter();
+        let mut builder = SortKeyBuilder::with_capacity(iter.size_hint().0);
+        for c in iter {
+            let s: &str = &c.into();
+            let col = Self::remove_escape(&s);
+            builder = builder.with_col(col);
+        }
+        builder.build()
+    }
+
     /// Create a new sort key from the provided columns
     pub fn from_columns<C, I>(columns: C) -> Self
     where
@@ -151,8 +173,79 @@ impl SortKey {
         builder.build()
     }
 
-    pub fn to_columns(&self) -> String {
-        self.columns.keys().join(",")
+    pub fn to_columns(&self) -> Vec<&str> {
+        let x = self
+            .columns
+            .keys()
+            //.map(|s| (**s).to_string())
+            .map(|s| (&**s))
+            .collect();
+        x
+    }
+
+    // Make a string of all columns, each separated by a comma
+    // Commas in each column will be escaped before putting the column together
+    pub fn to_columns_string(&self) -> String {
+        self.columns
+            .keys()
+            // escape all commas in each column
+            .map(|s| Self::escape(s, &[',']))
+            .join(",")
+    }
+
+    // Split string on the given char if it does not follow the escape
+    fn split_string_with_escape(value: &str, split_char: &[char]) -> Vec<String> 
+    {
+        let mut result = Vec::with_capacity(value.len());
+        let mut last = 0;
+        // Find all indices of the given char
+        for (idx, _) in value.match_indices(split_char) {
+            // The found idx has the escape in front, not split it
+            if idx > last && value[idx-1..idx] == "\\".to_string() {
+                continue;
+            }
+
+            // The found idx is the first one, nothing to split. Move to next char
+            if idx == last {
+                last = idx + 1;
+                continue;
+            }
+
+            let s = value[last..idx].to_string();
+            result.push(s);
+            last = idx + 1;
+        }
+
+        if value.len() > last {
+            result.push(value[last..].to_string());
+        }
+
+        result
+    }
+
+    // Add escape in infront of the give escaping_specification
+    fn escape(value: &str, escaping_specification: &[char]) -> String {
+        let mut last = 0;
+
+        let mut result = "".to_owned();
+
+        // find index of the escaping_specification
+        for (idx, delim) in value.match_indices(escaping_specification) {
+            let s = &value[last..idx];
+            let ss = format!(r#"{}\{}"#, s, delim);
+            result.push_str(&ss);
+            last = idx + delim.len();
+        }
+
+        // adding the rest of the string
+        let s = &value[last..];
+        result.push_str(s);
+
+        result
+    }
+
+    fn remove_escape(value: &str) -> String {
+        clean_non_meta_escapes(value)
     }
 
     /// Gets the ColumnSort for a given column name
@@ -940,9 +1033,77 @@ mod tests {
     }
 
     #[test]
-    fn test_size() {
+    fn test_size() { 
         let key_1 = SortKey::from_columns(vec![TIME_COLUMN_NAME]);
         let key_2 = SortKey::from_columns(vec!["a", TIME_COLUMN_NAME]);
         assert!(key_1.size() < key_2.size());
+    }
+
+    #[test]
+    fn test_escape() {
+        let result = SortKey::escape("a,b", &[',']);
+        assert_eq!(result, "a\\,b");
+
+        let result = SortKey::escape("a,", &[',']);
+        assert_eq!(result, "a\\,");
+
+        let result = SortKey::escape(",a", &[',']);
+        assert_eq!(result, "\\,a");
+
+        let result = SortKey::escape(",", &[',']);
+        assert_eq!(result, "\\,");
+
+        // no comma
+        let result = SortKey::escape("ab", &[',']);
+        assert_eq!(result, "ab");
+
+        // many commas
+        let result = SortKey::escape("a,b,,c,", &[',']);
+        assert_eq!(result, "a\\,b\\,\\,c\\,");
+    }
+
+    #[test]
+    fn test_remove_escape() {
+        let result = SortKey::remove_escape("a\\,b");
+        assert_eq!(result, "a,b");
+
+        let result = SortKey::remove_escape("a\\,");
+        assert_eq!(result, "a,");
+
+        let result = SortKey::remove_escape("\\,b");
+        assert_eq!(result, ",b");
+
+        let result = SortKey::remove_escape("\\,");
+        assert_eq!(result, ",");
+
+        // no escape
+        let result = SortKey::remove_escape("a,b");
+        assert_eq!(result, "a,b");
+
+        // many escapes
+        let result = SortKey::remove_escape("a\\,b\\,\\,c\\,");
+        assert_eq!(result, "a,b,,c,");
+    }
+
+    #[test]
+    fn test_split_string_with_escape() {
+        let result = SortKey::split_string_with_escape("a\\,b,c", &[',']);
+        assert_eq!(result, vec!["a\\,b", "c"]);
+
+        let result = SortKey::split_string_with_escape("a\\,b", &[',']);
+        assert_eq!(result, vec!["a\\,b"]);
+
+        let result = SortKey::split_string_with_escape("a,b,c", &[',']);
+        assert_eq!(result, vec!["a", "b", "c"]);
+
+        let result = SortKey::split_string_with_escape("\\", &[',']);
+        assert_eq!(result, vec!["\\"]);
+
+        let result = SortKey::split_string_with_escape("", &[',']);
+        assert!(result.is_empty());
+
+        let result = SortKey::split_string_with_escape("a\\,", &[',']);
+        assert_eq!(result, vec!["a\\,"]);
+
     }
 }

@@ -13,14 +13,14 @@ use datafusion::{
 };
 
 /// The name of the regex_match UDF given to DataFusion.
-pub(crate) const REGEX_MATCH_UDF_NAME: &str = "RegexMatch";
+pub const REGEX_MATCH_UDF_NAME: &str = "RegexMatch";
 
 /// The name of the not_regex_match UDF given to DataFusion.
-pub(crate) const REGEX_NOT_MATCH_UDF_NAME: &str = "RegexNotMatch";
+pub const REGEX_NOT_MATCH_UDF_NAME: &str = "RegexNotMatch";
 
 lazy_static::lazy_static! {
     /// Implementation of regexp_match
-    pub(crate) static ref REGEX_MATCH_UDF: Arc<ScalarUDF> = Arc::new(
+    pub static ref REGEX_MATCH_UDF: Arc<ScalarUDF> = Arc::new(
         create_udf(
             REGEX_MATCH_UDF_NAME,
             // takes two arguments: regex, pattern
@@ -34,7 +34,7 @@ lazy_static::lazy_static! {
 
 lazy_static::lazy_static! {
     /// Implementation of regexp_not_match
-    pub(crate) static ref REGEX_NOT_MATCH_UDF: Arc<ScalarUDF> = Arc::new(
+    pub static ref REGEX_NOT_MATCH_UDF: Arc<ScalarUDF> = Arc::new(
         create_udf(
             REGEX_NOT_MATCH_UDF_NAME,
             // takes two arguments: regex, pattern
@@ -152,7 +152,7 @@ fn is_valid_character_after_escape(c: char) -> bool {
 /// golang, used by the influx storage rpc.
 ///
 /// See <https://github.com/rust-lang/regex/issues/501> for more details
-fn clean_non_meta_escapes(pattern: &str) -> String {
+pub fn clean_non_meta_escapes(pattern: &str) -> String {
     if pattern.is_empty() {
         return pattern.to_string();
     }
