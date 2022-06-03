@@ -674,15 +674,23 @@ pub struct Partition {
     pub partition_key: String,
     /// The sort key for the partition. Should be computed on the first persist operation for
     /// this partition and updated if new tag columns are added.
+    /// This is a string of concactenated column names of the sort key, each separated by a comma. If
+    /// there are commas in a column name, they must have escape in front.
+    /// Example:
+    ///    Three columns in the sort key named: "col1", "col2_with,comma", "time"
+    ///    -> the sort_key is Some("col1,col2_with\\,comma,time")
     pub sort_key: Option<String>,
 }
 
 impl Partition {
     /// The sort key for the partition, if present, structured as a `SortKey`
+    /// The return SortKey includes column name withour escape
+    /// For example, if the sort_key is Some("col1,col2_with\\,comma,time"),
+    /// this function will return a SortKey of 3 columns named "col1", "col2_with,comma", "time"
     pub fn sort_key(&self) -> Option<SortKey> {
         self.sort_key
             .as_ref()
-            .map(|s| SortKey::from_solumns_string_with_escape(s))
+            .map(|s| SortKey::from_columns_string_with_escape(s))
     }
 }
 
@@ -2568,7 +2576,7 @@ mod tests {
         assert_eq!(stat2.overlaps(&stat1), StatOverlap::NonZero);
 
         //    [--stat1--]
-        //        [--stat3--] 
+        //        [--stat3--]
         let stat3 = StatValues {
             min: Some(15),
             max: Some(25),
@@ -3145,9 +3153,7 @@ mod tests {
         assert_eq!(partition.sort_key, Some("a\\,b,c,d\\,".to_string()));
 
         // 3 columns without escapes
-        let sort_key = SortKey::from_columns(["a,b","c", "d,"]);
+        let sort_key = SortKey::from_columns(["a,b", "c", "d,"]);
         assert_eq!(partition.sort_key(), Some(sort_key));
-
-
     }
 }

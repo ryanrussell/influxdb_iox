@@ -633,8 +633,6 @@ async fn update_catalog_sort_key_if_needed(
     // columns onto the end
     match partition.sort_key() {
         Some(catalog_sort_key) => {
-            // let sort_key_string = sort_key.to_columns_string();
-            // let new_sort_key: Vec<_> = sort_key_string.split(',').collect();
             let new_sort_key = sort_key.to_columns();
             let (_metadata, update) = adjust_sort_key_columns(&catalog_sort_key, &new_sort_key);
             if let Some(new_sort_key) = update {
