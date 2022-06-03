@@ -1069,6 +1069,12 @@ mod tests {
 
     #[test]
     fn test_escape() {
+        let result = SortKey::add_escape_before_comma("\\?");
+        assert_eq!(result, "\\?");
+
+        let result = SortKey::add_escape_before_comma("Over\\Under");
+        assert_eq!(result, "Over\\Under");
+
         let result = SortKey::add_escape_before_comma("a,b");
         assert_eq!(result, "a\\,b");
 
