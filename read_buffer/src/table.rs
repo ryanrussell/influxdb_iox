@@ -1767,6 +1767,24 @@ west,host-b,100
             vec!["time".to_owned()],
         );
 
+        // One of the columns in the predicate doesn't exist, but the expr is `!=`, so rows in this
+        // table would always return true. The other expr is valid.
+        dst = table
+            .column_names(
+                &Predicate::new(vec![
+                    BinaryExpr::from(("host", "!=", "foo")),
+                    BinaryExpr::from(("region", "=", "west")),
+                ]),
+                &[],
+                Selection::All,
+                BTreeSet::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            dst.iter().cloned().collect::<Vec<_>>(),
+            vec!["region".to_owned(), "time".to_owned()],
+        );
+
         // invalid predicate
         assert!(table
             .column_names(
