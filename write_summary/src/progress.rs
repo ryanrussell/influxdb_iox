@@ -1,5 +1,7 @@
 use data_types::SequenceNumber;
 
+use crate::MinSequenceNumber;
+
 /// Information on how much data a particular sequencer has been processed
 ///
 /// ```text
@@ -43,6 +45,20 @@ impl SequencerProgress {
                 .map(|cur| cur.max(sequence_number))
                 .unwrap_or(sequence_number),
         );
+        self
+    }
+
+    /// Note that `sequence_number`, if any, is now the min buffered
+    /// value
+    pub fn with_min_buffered(mut self, sequence_number: MinSequenceNumber) -> Self {
+        if let Some(sequence_number) = sequence_number.into_inner() {
+            self.min_buffered = Some(
+                self.min_buffered
+                    .take()
+                    .map(|cur| cur.max(sequence_number))
+                    .unwrap_or(sequence_number),
+            );
+        }
         self
     }
 

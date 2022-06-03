@@ -6,7 +6,10 @@ use observability_deps::tracing::debug;
 use snafu::{OptionExt, Snafu};
 use std::collections::BTreeMap;
 
+mod min_sequence_number;
 mod progress;
+
+pub use min_sequence_number::MinSequenceNumber;
 pub use progress::SequencerProgress;
 
 #[derive(Debug, Snafu, PartialEq)]
