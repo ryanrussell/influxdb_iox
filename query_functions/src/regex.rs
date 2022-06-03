@@ -152,7 +152,7 @@ fn is_valid_character_after_escape(c: char) -> bool {
 /// golang, used by the influx storage rpc.
 ///
 /// See <https://github.com/rust-lang/regex/issues/501> for more details
-pub fn clean_non_meta_escapes(pattern: &str) -> String {
+fn clean_non_meta_escapes(pattern: &str) -> String {
     if pattern.is_empty() {
         return pattern.to_string();
     }

@@ -678,13 +678,13 @@ pub struct Partition {
     /// there are commas in a column name, they must have escape in front.
     /// Example:
     ///    Three columns in the sort key named: "col1", "col2_with,comma", "time"
-    ///    -> the sort_key is Some("col1,col2_with\\,comma,time")
+    ///    ->  Value of the sort_key is Some("col1,col2_with\\,comma,time")
     pub sort_key: Option<String>,
 }
 
 impl Partition {
     /// The sort key for the partition, if present, structured as a `SortKey`
-    /// The return SortKey includes column name withour escape
+    /// The returned SortKey includes column name without escapes
     /// For example, if the sort_key is Some("col1,col2_with\\,comma,time"),
     /// this function will return a SortKey of 3 columns named "col1", "col2_with,comma", "time"
     pub fn sort_key(&self) -> Option<SortKey> {
@@ -3147,9 +3147,10 @@ mod tests {
             sequencer_id: SequencerId::new(1),
             table_id: TableId::new(1),
             partition_key: "whatever".to_string(),
-            sort_key: Some("a\\,b,c,d\\,".to_string()),
+            sort_key: Some("a\\,b,c,d\\,".to_string()), // A string with escapes
         };
 
+      // Same string with escapes
         assert_eq!(partition.sort_key, Some("a\\,b,c,d\\,".to_string()));
 
         // 3 columns without escapes

@@ -137,6 +137,7 @@ impl SortKey {
         }
     }
 
+    /// Create a sort key from a string of columns with escapes
     pub fn from_columns_string_with_escape(cols_string: &str) -> Self {
         let cols = Self::split_string_by_comma_not_follow_escape(cols_string);
         Self::from_columns_with_escape(cols)

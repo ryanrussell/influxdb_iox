@@ -1439,7 +1439,7 @@ pub(crate) mod test_helpers {
             "tag2,tag1,tag3,time"
         );
 
-        // Test update sort keys with comma
+        // Test update sort keys with comma. The "tag4,whatever" is name of a column
         let partition = repos
             .partitions()
             .update_sort_key(other_partition.id, r#"tag2,tag1,tag3,tag4\,whatever,time"#)
