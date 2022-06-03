@@ -48,7 +48,7 @@ impl SequencerProgress {
         self
     }
 
-    /// Note that `sequence_number`, if any, is now the min buffered
+    /// Update this progress given the `sequence_number`, if any, is now the min buffered
     /// value
     pub fn with_min_buffered(mut self, sequence_number: MinSequenceNumber) -> Self {
         if let Some(sequence_number) = sequence_number.into_inner() {
@@ -58,6 +58,9 @@ impl SequencerProgress {
                     .map(|cur| cur.max(sequence_number))
                     .unwrap_or(sequence_number),
             );
+        } else {
+            // There was no buffered data
+            self.min_buffered = None;
         }
         self
     }

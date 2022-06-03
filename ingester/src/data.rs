@@ -363,6 +363,11 @@ impl Persister for IngesterData {
         sequencer_id: SequencerId,
         sequence_number: SequenceNumber,
     ) {
+        debug!(
+            ?sequence_number,
+            ?sequencer_id,
+            "Updating min unpersisted sequence number"
+        );
         Backoff::new(&self.backoff_config)
             .retry_all_errors("updating min_unpersisted_sequence_number", || async {
                 self.catalog
@@ -497,8 +502,11 @@ impl SequencerData {
         let mut progress = SequencerProgress::new();
 
         for namespace_data in namespaces {
-            progress = progress.combine(namespace_data.progress().await);
+            let namespace_progress = namespace_data.progress().await;
+            debug!(?namespace_progress, namespace=?namespace_data.namespace_id, "AAL combining namespace");
+            progress = progress.combine(namespace_progress);
         }
+        debug!(?progress, "Completed progress");
         progress
     }
 }
@@ -584,6 +592,7 @@ impl NamespaceData {
         {
             let mut progress = self.progress.write();
             *progress = progress.clone().with_buffered(sequence_number);
+            debug!(?progress, "Updated namespace data progress");
         }
         result
     }
@@ -764,7 +773,6 @@ impl NamespaceData {
         if let Some(t) = self.table_data(table_name) {
             let mut t = t.write().await;
             let partition = t.partition_data.get_mut(partition_key);
-
             if let Some(p) = partition {
                 p.data.max_persisted_sequence_number = Some(sequence_number);
                 p.data.persisting = None;
@@ -772,20 +780,28 @@ impl NamespaceData {
                 p.data.deletes_during_persisting.clear();
 
                 min_sequence_number = min_sequence_number.min(p.data.min_sequence_number());
+                debug!(?table_name, ?min_sequence_number, "After partition data");
             }
         }
         // lock scope to update progess
         {
-            debug!(
-                ?sequence_number,
-                ?min_sequence_number,
-                "AAL updating persistence"
-            );
             let mut progress = self.progress.write();
+            let current_progress = progress.clone();
+
             *progress = progress
                 .clone()
                 .with_persisted(sequence_number)
-                .with_min_buffered(min_sequence_number)
+                .with_min_buffered(min_sequence_number.clone());
+
+            debug!(
+                ?sequence_number,
+                ?min_sequence_number,
+                ?current_progress,
+                new_progress=?progress,
+                ?table_name,
+                namespace=?self.namespace_id,
+                "AAL updating progress"
+            );
         }
     }
 
@@ -1850,8 +1866,8 @@ mod tests {
         expected_progresses.insert(
             kafka_partition,
             SequencerProgress::new()
-                // note sequence number 0 has been completely persisted
-                .with_buffered(SequenceNumber::new(1))
+                // note sequence number 1 has been completely and is no longer buffered
+                .with_buffered(SequenceNumber::new(2))
                 .with_persisted(SequenceNumber::new(2)),
         );
         assert_eq!(progresses, expected_progresses);

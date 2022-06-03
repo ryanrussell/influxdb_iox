@@ -37,23 +37,19 @@ impl MinSequenceNumber {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-
     #[test]
     fn min_none() {
-        let sequence_number = MinSequenceNumber::new()
-            .min(None);
+        let sequence_number = MinSequenceNumber::new().min(None);
         assert_eq!(sequence_number.into_inner(), None);
     }
 
     #[test]
     fn min_val() {
-        let sequence_number = MinSequenceNumber::new()
-            .min(Some(SequenceNumber::new(5)));
+        let sequence_number = MinSequenceNumber::new().min(Some(SequenceNumber::new(5)));
         assert_eq!(sequence_number.into_inner(), Some(SequenceNumber::new(5)));
     }
 
@@ -61,7 +57,7 @@ mod tests {
     fn min_val_then_none() {
         let sequence_number = MinSequenceNumber::new()
             .min(Some(SequenceNumber::new(5)))
-        // expect no update after none
+            // expect no update after none
             .min(None);
         assert_eq!(sequence_number.into_inner(), Some(SequenceNumber::new(5)));
     }
@@ -77,13 +73,11 @@ mod tests {
 
     #[test]
     fn min_iter() {
-        let sequence_number = MinSequenceNumber::new()
-            .min_iter(vec![
-                Some(SequenceNumber::new(4)),
-                Some(SequenceNumber::new(5)),
-                Some(SequenceNumber::new(3)),
-            ]);
+        let sequence_number = MinSequenceNumber::new().min_iter(vec![
+            Some(SequenceNumber::new(4)),
+            Some(SequenceNumber::new(5)),
+            Some(SequenceNumber::new(3)),
+        ]);
         assert_eq!(sequence_number.into_inner(), Some(SequenceNumber::new(3)));
     }
-
 }
