@@ -1669,6 +1669,7 @@ mod tests {
 
     #[tokio::test]
     async fn persist() {
+        test_helpers::maybe_start_logging();
         let metrics = Arc::new(metric::Registry::new());
         let catalog: Arc<dyn Catalog> = Arc::new(MemCatalog::new(Arc::clone(&metrics)));
         let mut repos = catalog.repositories().await;
