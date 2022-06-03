@@ -572,7 +572,7 @@ impl NamespaceData {
             dml_operation, sequence_number, sequencer_id, catalog, lifecycle_handle, partitioner, executor
         ).await;
 
-        // Update readable progress
+        // lock scope to update readable progress
         {
             let mut progress = self.progress.write();
             *progress = progress.clone().with_buffered(sequence_number);
@@ -603,7 +603,7 @@ impl NamespaceData {
                     };
 
                     // TEMP: Inject a pause here to simulate slow writes
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+ //                   tokio::time::sleep(Duration::from_millis(100)).await;
 
                     let mut table_data = table_data.write().await;
                     let should_pause = table_data
@@ -755,6 +755,11 @@ impl NamespaceData {
                 // clear the deletes kept for this persisting batch
                 p.data.deletes_during_persisting.clear();
             }
+        }
+        // lock scope to update progess
+        {
+            let mut progress = self.progress.write();
+            *progress = progress.clone().with_persisted(sequence_number);
         }
     }
 
@@ -1696,14 +1701,14 @@ mod tests {
             .unwrap();
 
         // check progresses
+        let expected_partition_progress = SequencerProgress::new()
+            .with_buffered(SequenceNumber::new(1))
+            .with_buffered(SequenceNumber::new(2));
+
+        let expected_progresses = [
+            (kafka_partition,expected_partition_progress.clone())
+        ].into_iter().collect::<BTreeMap<_, _>>();
         let progresses = data.progresses(vec![kafka_partition]).await;
-        let mut expected_progresses = BTreeMap::new();
-        expected_progresses.insert(
-            kafka_partition,
-            SequencerProgress::new()
-                .with_buffered(SequenceNumber::new(1))
-                .with_buffered(SequenceNumber::new(2)),
-        );
         assert_eq!(progresses, expected_progresses);
 
         let sd = data.sequencers.get(&sequencer1.id).unwrap();
@@ -1771,14 +1776,12 @@ mod tests {
         assert_eq!(partition_info.partition.sort_key.unwrap(), "time");
 
         // check progresses after persist
+        let expected_partition_progress = expected_partition_progress
+            .with_persisted(SequenceNumber::new(2));
+        let expected_progresses = [
+            (kafka_partition,expected_partition_progress)
+        ].into_iter().collect::<BTreeMap<_,_>>();
         let progresses = data.progresses(vec![kafka_partition]).await;
-        let mut expected_progresses = BTreeMap::new();
-        expected_progresses.insert(
-            kafka_partition,
-            SequencerProgress::new()
-                .with_buffered(SequenceNumber::new(1))
-                .with_persisted(SequenceNumber::new(2)),
-        );
         assert_eq!(progresses, expected_progresses);
     }
 
