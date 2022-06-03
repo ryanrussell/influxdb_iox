@@ -3150,7 +3150,7 @@ mod tests {
             sort_key: Some("a\\,b,c,d\\,".to_string()), // A string with escapes
         };
 
-      // Same string with escapes
+        // Same string with escapes
         assert_eq!(partition.sort_key, Some("a\\,b,c,d\\,".to_string()));
 
         // 3 columns without escapes
