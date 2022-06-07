@@ -114,3 +114,9 @@ inherits = "release"
 codegen-units = 16
 lto = false
 incremental = true
+
+
+[patch.crates-io]
+arrow = { path='/Users/alamb/Software/arrow-rs/arrow' }
+parquet = { path='/Users/alamb/Software/arrow-rs/parquet' }
+arrow-flight = { path='/Users/alamb/Software/arrow-rs/arrow-flight' }
