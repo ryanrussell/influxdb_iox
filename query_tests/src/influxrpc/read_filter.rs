@@ -187,17 +187,7 @@ async fn test_read_filter_invalid_predicate_case() {
         // https://github.com/influxdata/influxdb_iox/issues/3635
         // model what happens when a field is treated like a tag
         // CASE WHEN system" IS NULL THEN '' ELSE system END = 5;
-<<<<<<< HEAD
-        .add_expr(
-            when(col("system").is_null(), lit(""))
-                .otherwise(col("system"))
-                .unwrap()
-                .eq(lit(5i32)),
-        );
-=======
-        .add_expr(make_empty_tag_ref_expr("system").eq(lit(5i32)))
-        .build();
->>>>>>> 98b6dd561 (test: reproducer for influxrpc error)
+        .add_expr(make_empty_tag_ref_expr("system").eq(lit(5i32)));
     let predicate = InfluxRpcPredicate::new(None, predicate);
 
     let expected_error = "gRPC planner got error creating predicates: Error during planning: 'Utf8 = Int32' can't be evaluated because there isn't a common type to coerce the types to";
@@ -762,7 +752,7 @@ async fn test_read_filter_multi_negation() {
 
     let host = make_empty_tag_ref_expr("host");
     let p1 = host.clone().eq(lit("server01")).or(host.eq(lit("")));
-    let predicate = PredicateBuilder::default().add_expr(p1).build();
+    let predicate = Predicate::default().add_expr(p1);
     let predicate = InfluxRpcPredicate::new(None, predicate);
 
     let expected_results = vec!["FOO"];
