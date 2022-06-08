@@ -204,7 +204,7 @@ async fn run_compactor(compactor: Arc<Compactor>, shutdown: CancellationToken) {
                         let handle = tokio::task::spawn(async move {
                             debug!(candidate=?c, "compacting candidate");
                             let res = compactor
-                                .compact_partition(c.partition_id, compact_and_upgrade)
+                                .compact_partition(c.partition_id, compact_and_upgrade, max_file_size)
                                 .await;
                             if let Err(e) = res {
                                 warn!(

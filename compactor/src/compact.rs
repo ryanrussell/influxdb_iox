@@ -424,6 +424,7 @@ impl Compactor {
         &self,
         partition_id: PartitionId,
         compact_and_upgrade: CompactAndUpgrade,
+        max_file_size: i64,
     ) -> Result<()> {
         if !compact_and_upgrade.compactable() {
             return Ok(());
@@ -466,7 +467,7 @@ impl Compactor {
             // caller. If an error occurs during object store upload, it will be
             // retried indefinitely.
             let catalog_update_info = self
-                .compact(group.parquet_files, &partition)
+                .compact(group.parquet_files, &partition, max_file_size)
                 .await?
                 .into_iter()
                 .map(|v| async {
@@ -615,6 +616,7 @@ impl Compactor {
         &self,
         overlapped_files: Vec<ParquetFileWithTombstone>,
         partition: &Partition,
+        max_file_size: i64,
     ) -> Result<Vec<CompactedData>> {
         debug!(num_files = overlapped_files.len(), "compact files");
 
@@ -636,6 +638,12 @@ impl Compactor {
         let namespace_id = overlapped_files[0].namespace_id;
         let table_id = overlapped_files[0].table_id;
 
+        // Total size of all files
+        let total_size = overlapped_files
+            .iter()
+            .map(|f| f.file_size_bytes)
+            .sum::<i64>();
+        
         //  Collect all unique tombstone
         let mut tombstone_map = overlapped_files[0].tombstone_map();
 
@@ -719,25 +727,25 @@ impl Compactor {
             .filter_to(&merged_schema.primary_key());
 
         // Identify split time
-        let split_time = self.compute_split_time(min_time, max_time);
+        let split_times = self.compute_split_time(min_time, max_time, total_size, max_file_size);
 
         // Build compact logical plan
         let plan = {
             // split data to compact data into 2 files
-            if min_time < split_time && split_time < max_time {
+            if split_times.len() == 1 && split_times[0] == max_time {
+                // compact everything into one file
+                ReorgPlanner::new()
+                    .compact_plan(Arc::clone(&merged_schema), query_chunks, sort_key.clone())
+                    .context(CompactLogicalPlanSnafu)?
+            } else {
                 // split compact query plan
                 ReorgPlanner::new()
                     .split_plan(
                         Arc::clone(&merged_schema),
                         query_chunks,
                         sort_key.clone(),
-                        split_time,
+                        split_times[0]   // TODO: make this a vector
                     )
-                    .context(CompactLogicalPlanSnafu)?
-            } else {
-                // compact everything into one file
-                ReorgPlanner::new()
-                    .compact_plan(Arc::clone(&merged_schema), query_chunks, sort_key.clone())
                     .context(CompactLogicalPlanSnafu)?
             }
         };
@@ -859,8 +867,23 @@ impl Compactor {
     }
 
     // Compute time to split data
-    fn compute_split_time(&self, min_time: i64, max_time: i64) -> i64 {
-        min_time + (max_time - min_time) * self.config.split_percentage() / 100
+    fn compute_split_time(&self, min_time: i64, max_time: i64, total_size: i64, max_file_size: i64) -> Vec<i64> {
+        // Too small to split
+        if total_size <= max_file_size { return vec![max_time] }
+
+        let split_times = vec![];
+        let percentage = max_file_size / total_size;
+        let mut min = min_time;
+        loop {
+            let split_time = min + min * percentage;
+            if split_time < max_time { 
+                split_times.push(split_time);
+                min = split_time;
+            }
+            else { break; }
+        }
+
+        split_times
     }
 
     // remove fully processed tombstones
