@@ -727,7 +727,7 @@ impl Compactor {
             .filter_to(&merged_schema.primary_key());
 
         // Identify split time
-        let split_times = self.compute_split_time(min_time, max_time, total_size, max_file_size);
+        let split_times = Self::compute_split_time(min_time, max_time, total_size, max_file_size);
 
         // Build compact logical plan
         let plan = {
@@ -868,7 +868,6 @@ impl Compactor {
 
     // Compute time to split data
     fn compute_split_time(
-        &self,
         min_time: i64,
         max_time: i64,
         total_size: i64,
@@ -880,10 +879,10 @@ impl Compactor {
         }
 
         let mut split_times = vec![];
-        let percentage = max_file_size / total_size;
+        let percentage = max_file_size as f64 / total_size as f64;
         let mut min = min_time;
         loop {
-            let split_time = min + min * percentage;
+            let split_time = min + ((max_time - min_time) as f64 * percentage).floor() as i64;
             if split_time < max_time {
                 split_times.push(split_time);
                 min = split_time;
@@ -1096,6 +1095,34 @@ mod tests {
     static NEXT_ID: AtomicI64 = AtomicI64::new(0);
     static TEST_MAX_SIZE_BYTES: i64 = 100000;
     static TEST_MAX_FILE_COUNT: i64 = 10;
+
+    #[tokio::test]
+    async fn test_compute_split_time() {
+        let min_time = 1;
+        let max_time = 11;
+        let total_size = 100;
+        let max_file_size = 100;
+
+        // no split
+        let result = Compactor::compute_split_time(min_time, max_time, total_size, max_file_size);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], max_time);
+
+        // split 70% and 30%
+        let max_file_size = 70;
+        let result = Compactor::compute_split_time(min_time, max_time, total_size, max_file_size);
+        // only need to store the last split time
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], 8); // = 1 (min_time + 7)
+
+        // split 40%, 40%, 20%
+        let max_file_size = 40;
+        let result = Compactor::compute_split_time(min_time, max_time, total_size, max_file_size);
+        // store first and second split time
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], 5); // = 1 (min_time) + 4
+        assert_eq!(result[1], 9); // = 5 (previous split_time) + 4
+    }
 
     #[tokio::test]
     // This is integration test to verify all pieces are put together correctly
