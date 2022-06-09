@@ -643,7 +643,7 @@ impl Compactor {
             .iter()
             .map(|f| f.file_size_bytes)
             .sum::<i64>();
-        
+
         //  Collect all unique tombstone
         let mut tombstone_map = overlapped_files[0].tombstone_map();
 
@@ -744,7 +744,7 @@ impl Compactor {
                         Arc::clone(&merged_schema),
                         query_chunks,
                         sort_key.clone(),
-                        split_times[0]   // TODO: make this a vector
+                        split_times[0], // TODO: make this a vector
                     )
                     .context(CompactLogicalPlanSnafu)?
             }
@@ -867,20 +867,29 @@ impl Compactor {
     }
 
     // Compute time to split data
-    fn compute_split_time(&self, min_time: i64, max_time: i64, total_size: i64, max_file_size: i64) -> Vec<i64> {
+    fn compute_split_time(
+        &self,
+        min_time: i64,
+        max_time: i64,
+        total_size: i64,
+        max_file_size: i64,
+    ) -> Vec<i64> {
         // Too small to split
-        if total_size <= max_file_size { return vec![max_time] }
+        if total_size <= max_file_size {
+            return vec![max_time];
+        }
 
-        let split_times = vec![];
+        let mut split_times = vec![];
         let percentage = max_file_size / total_size;
         let mut min = min_time;
         loop {
             let split_time = min + min * percentage;
-            if split_time < max_time { 
+            if split_time < max_time {
                 split_times.push(split_time);
                 min = split_time;
+            } else {
+                break;
             }
-            else { break; }
         }
 
         split_times
@@ -1134,6 +1143,10 @@ mod tests {
 
         // ------------------------------------------------
         // Compact
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -1141,7 +1154,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -1154,7 +1172,11 @@ mod tests {
             .await
             .unwrap();
         compactor
-            .compact_partition(partition.partition.id, compact_and_upgrade)
+            .compact_partition(
+                partition.partition.id,
+                compact_and_upgrade,
+                compaction_max_size_bytes,
+            )
             .await
             .unwrap();
 
@@ -1283,6 +1305,10 @@ mod tests {
             .create_partition("part")
             .await;
         let time = Arc::new(SystemProvider::new());
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -1290,7 +1316,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -1382,7 +1413,11 @@ mod tests {
             .await
             .unwrap();
         compactor
-            .compact_partition(partition.partition.id, compact_and_upgrade)
+            .compact_partition(
+                partition.partition.id,
+                compact_and_upgrade,
+                compactor.config.compaction_max_size_bytes(),
+            )
             .await
             .unwrap();
 
@@ -1489,6 +1524,10 @@ mod tests {
             .await
             .parquet_file;
 
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -1496,7 +1535,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -1506,7 +1550,11 @@ mod tests {
         // ------------------------------------------------
         // no files provided
         let result = compactor
-            .compact(vec![], &partition.partition)
+            .compact(
+                vec![],
+                &partition.partition,
+                compactor.config.compaction_max_size_bytes(),
+            )
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -1516,7 +1564,11 @@ mod tests {
         let mut pf = ParquetFileWithTombstone::new(Arc::new(parquet_file), vec![]);
         // Nothing compacted for one file without tombstones
         let result = compactor
-            .compact(vec![pf.clone()], &partition.partition)
+            .compact(
+                vec![pf.clone()],
+                &partition.partition,
+                compactor.config.compaction_max_size_bytes(),
+            )
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -1531,11 +1583,15 @@ mod tests {
 
         // should have compacted data
         let batches = compactor
-            .compact(vec![pf], &partition.partition)
+            .compact(
+                vec![pf],
+                &partition.partition,
+                compactor.config.compaction_max_size_bytes(),
+            )
             .await
             .unwrap();
-        // 2 sets based on the split rule
-        assert_eq!(batches.len(), 2);
+        // One output batch because the input is too small to split
+        assert_eq!(batches.len(), 1);
 
         // Collect the results for inspection.
         let batches = batches
@@ -1550,27 +1606,16 @@ mod tests {
             .await;
 
         // Data: row tag1=VT was removed
-        // first set contains least recent data
         assert_batches_sorted_eq!(
             &[
                 "+-----------+------+-----------------------------+",
                 "| field_int | tag1 | time                        |",
                 "+-----------+------+-----------------------------+",
                 "| 1000      | WA   | 1970-01-01T00:00:00.000008Z |",
-                "+-----------+------+-----------------------------+",
-            ],
-            &batches[0]
-        );
-        // second set contains most recent data
-        assert_batches_sorted_eq!(
-            &[
-                "+-----------+------+-----------------------------+",
-                "| field_int | tag1 | time                        |",
-                "+-----------+------+-----------------------------+",
                 "| 70        | UT   | 1970-01-01T00:00:00.000020Z |",
                 "+-----------+------+-----------------------------+",
             ],
-            &batches[1]
+            &batches[0]
         );
     }
 
@@ -1596,6 +1641,10 @@ mod tests {
             .await
             .parquet_file;
 
+        let split_percentage = 100;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -1604,7 +1653,12 @@ mod tests {
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
             // split_percentage = 100 which means no split
-            CompactorConfig::new(100, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -1624,7 +1678,11 @@ mod tests {
 
         // should have compacted datas
         let batches = compactor
-            .compact(vec![pf], &partition.partition)
+            .compact(
+                vec![pf],
+                &partition.partition,
+                compactor.config.compaction_max_size_bytes(),
+            )
             .await
             .unwrap();
         // 1 output set becasue split rule = 100%
@@ -1690,6 +1748,10 @@ mod tests {
             .await
             .parquet_file;
 
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -1697,7 +1759,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -1718,7 +1785,11 @@ mod tests {
 
         // Compact them
         let batches = compactor
-            .compact(vec![pf1, pf2], &partition.partition)
+            .compact(
+                vec![pf1, pf2],
+                &partition.partition,
+                compactor.config.compaction_max_size_bytes(),
+            )
             .await
             .unwrap();
         // 2 sets based on the split rule
@@ -1809,6 +1880,10 @@ mod tests {
             .await
             .parquet_file;
 
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -1816,7 +1891,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -1844,6 +1924,7 @@ mod tests {
             .compact(
                 vec![pf1.clone(), pf2.clone(), pf3.clone()],
                 &partition.partition,
+                compactor.config.compaction_max_size_bytes(),
             )
             .await
             .unwrap();
@@ -2362,6 +2443,10 @@ mod tests {
     async fn add_tombstones_to_parquet_files_in_groups() {
         let catalog = TestCatalog::new();
 
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![],
             Arc::clone(&catalog.catalog),
@@ -2369,7 +2454,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -2567,6 +2657,10 @@ mod tests {
     async fn test_add_parquet_file_with_tombstones() {
         let catalog = TestCatalog::new();
 
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![],
             Arc::clone(&catalog.catalog),
@@ -2574,7 +2668,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -2894,6 +2993,10 @@ mod tests {
             .unwrap();
         txn.commit().await.unwrap();
 
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -2901,7 +3004,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -2968,6 +3076,10 @@ mod tests {
             .await
             .parquet_file;
 
+        let split_percentage = 90;
+        let max_concurrent_compaction_size_bytes = 100000;
+        let compaction_max_size_bytes = 100000;
+        let compaction_max_file_count = 10;
         let compactor = Compactor::new(
             vec![sequencer.sequencer.id],
             Arc::clone(&catalog.catalog),
@@ -2975,7 +3087,12 @@ mod tests {
             Arc::new(Executor::new(1)),
             Arc::new(SystemProvider::new()),
             BackoffConfig::default(),
-            CompactorConfig::new(90, 100000, 100000, 10),
+            CompactorConfig::new(
+                split_percentage,
+                max_concurrent_compaction_size_bytes,
+                compaction_max_size_bytes,
+                compaction_max_file_count,
+            ),
             Arc::new(metric::Registry::new()),
         );
 
@@ -2988,7 +3105,11 @@ mod tests {
         let partition = partition.update_sort_key(sort_key).await;
 
         let batches = compactor
-            .compact(vec![pf1, pf2], &partition.partition)
+            .compact(
+                vec![pf1, pf2],
+                &partition.partition,
+                compactor.config.compaction_max_size_bytes(),
+            )
             .await
             .unwrap();
 
