@@ -48,7 +48,7 @@ pub struct SinkInstrumentation<F, T, P = SystemProvider> {
     watermark_fetcher: F,
 
     /// The sequencer ID this instrumentation is recording op metrics for.
-    sequencer_id: i32,
+    kafka_partition: KafkaPartition,
 
     /// Op application success/failure call latency histograms (which include
     /// counters)
@@ -150,7 +150,7 @@ where
         Self {
             inner,
             watermark_fetcher,
-            sequencer_id: kafka_partition.get(),
+            kafka_partition,
 
             op_apply_success_ms,
             op_apply_error_ms,
@@ -198,9 +198,9 @@ where
             .sequence()
             .expect("entry from write buffer must be sequenced");
         assert_eq!(
-            sequence.sequencer_id as i32, self.sequencer_id,
+            sequence.kafka_partition, self.kafka_partition,
             "instrumentation for kafka partition {} saw op from kafka partition {}",
-            self.sequencer_id, sequence.sequencer_id,
+            self.kafka_partition, sequence.kafka_partition,
         );
 
         // Record the "last read sequence number" write buffer metric.
@@ -270,7 +270,7 @@ mod tests {
 
     /// The sequencer ID the [`SinkInstrumentation`] under test is configured to
     /// be observing for.
-    const SEQUENCER_ID: u32 = 42;
+    const KAFKA_PARTITION: KafkaPartition = KafkaPartition::new(42);
 
     static TEST_KAFKA_TOPIC: &str = "kafka_topic_name";
 
@@ -280,7 +280,7 @@ mod tests {
         /// The attributes assigned to the metrics emitted by the
         /// instrumentation when using the above sequencer / kafka topic values.
         static ref DEFAULT_ATTRS: Attributes = Attributes::from([
-            ("kafka_partition", SEQUENCER_ID.to_string().into()),
+            ("kafka_partition", KAFKA_PARTITION.to_string().into()),
             ("kafka_topic", TEST_KAFKA_TOPIC.into()),
         ]);
     }
@@ -319,7 +319,7 @@ mod tests {
             inner,
             MockWatermarkFetcher::new(with_fetcher_return),
             TEST_KAFKA_TOPIC.to_string(),
-            KafkaPartition::new(SEQUENCER_ID as _),
+            KAFKA_PARTITION,
             metrics,
         );
 
@@ -353,7 +353,7 @@ mod tests {
 
         let meta = DmlMeta::sequenced(
             // Op is offset 100 for sequencer 42
-            Sequence::new(SEQUENCER_ID, SequenceNumber::new(100)),
+            Sequence::new(KAFKA_PARTITION, SequenceNumber::new(100)),
             *TEST_TIME,
             Some(span),
             4242,
@@ -418,7 +418,7 @@ mod tests {
 
         let meta = DmlMeta::sequenced(
             // Op is offset 100 for sequencer 42
-            Sequence::new(SEQUENCER_ID, SequenceNumber::new(100)),
+            Sequence::new(KAFKA_PARTITION, SequenceNumber::new(100)),
             *TEST_TIME,
             Some(span),
             4242,
@@ -488,7 +488,7 @@ mod tests {
 
         let meta = DmlMeta::sequenced(
             // Op is offset 100 for sequencer 42
-            Sequence::new(SEQUENCER_ID, SequenceNumber::new(100)),
+            Sequence::new(KAFKA_PARTITION, SequenceNumber::new(100)),
             *TEST_TIME,
             Some(span),
             4242,
@@ -553,7 +553,7 @@ mod tests {
 
         let meta = DmlMeta::sequenced(
             // Op is offset 100 for sequencer 42
-            Sequence::new(SEQUENCER_ID, SequenceNumber::new(100)),
+            Sequence::new(KAFKA_PARTITION, SequenceNumber::new(100)),
             *TEST_TIME,
             Some(span),
             4242,
@@ -624,12 +624,14 @@ mod tests {
     // for a different sequencer it should panic.
     #[should_panic = "instrumentation for kafka partition 42 saw op from kafka partition 52"]
     #[tokio::test]
-    async fn test_op_different_sequencer_id() {
+    async fn test_op_different_kafka_partition() {
         let metrics = metric::Registry::default();
+        // A different kafka partition ID from what the handler is configured to
+        // be instrumenting
+        let other_kafka_partition = KafkaPartition::new(KAFKA_PARTITION.get() + 10);
+
         let meta = DmlMeta::sequenced(
-            // A different kafka partition ID from what the handler is configured to
-            // be instrumenting
-            Sequence::new(SEQUENCER_ID + 10, SequenceNumber::new(100)),
+            Sequence::new(other_kafka_partition, SequenceNumber::new(100)),
             *TEST_TIME,
             None,
             4242,

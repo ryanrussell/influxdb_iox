@@ -188,7 +188,7 @@ impl IngestHandlerImpl {
             // Acquire a write buffer stream and seek it to the last
             // definitely-already-persisted op
             let mut op_stream = write_buffer
-                .stream_handler(kafka_partition.get() as u32)
+                .stream_handler(kafka_partition)
                 .await
                 .context(WriteBufferSnafu)?;
             debug!(
@@ -419,7 +419,7 @@ mod tests {
             "foo",
             lines_to_batches("mem foo=1 10", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(0, SequenceNumber::new(0)),
+                Sequence::new(KafkaPartition::new(0), SequenceNumber::new(0)),
                 ingest_ts1,
                 None,
                 50,
@@ -434,7 +434,7 @@ mod tests {
             "foo",
             lines_to_batches("cpu bar=2 20\ncpu bar=3 30", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(0, SequenceNumber::new(7)),
+                Sequence::new(KafkaPartition::new(0), SequenceNumber::new(7)),
                 ingest_ts2,
                 None,
                 150,
@@ -449,7 +449,7 @@ mod tests {
             "foo",
             lines_to_batches("a b=2 200", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(0, SequenceNumber::new(9)),
+                Sequence::new(KafkaPartition::new(0), SequenceNumber::new(9)),
                 ingest_ts2,
                 None,
                 150,
@@ -742,7 +742,7 @@ mod tests {
                 "foo",
                 lines_to_batches("cpu bar=2 20", 0).unwrap(),
                 DmlMeta::sequenced(
-                    Sequence::new(0, SequenceNumber::new(1)),
+                    Sequence::new(KafkaPartition::new(0), SequenceNumber::new(1)),
                     ingest_ts1,
                     None,
                     150,
@@ -752,7 +752,7 @@ mod tests {
                 "foo",
                 lines_to_batches("cpu bar=2 30", 0).unwrap(),
                 DmlMeta::sequenced(
-                    Sequence::new(0, SequenceNumber::new(2)),
+                    Sequence::new(KafkaPartition::new(0), SequenceNumber::new(2)),
                     ingest_ts2,
                     None,
                     150,
@@ -793,7 +793,7 @@ mod tests {
             "foo",
             lines_to_batches("cpu bar=2 20", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(0, SequenceNumber::new(1)),
+                Sequence::new(KafkaPartition::new(0), SequenceNumber::new(1)),
                 ingest_ts1,
                 None,
                 150,

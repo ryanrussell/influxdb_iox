@@ -459,7 +459,7 @@ mod tests {
     fn make_write(name: impl Into<String>, write_time: u64) -> DmlWrite {
         let tables = lines_to_batches("bananas level=42 4242", 0).unwrap();
         let sequence = DmlMeta::sequenced(
-            Sequence::new(1, SequenceNumber::new(2)),
+            Sequence::new(KafkaPartition::new(1), SequenceNumber::new(2)),
             TEST_TIME
                 .checked_sub(Duration::from_millis(write_time))
                 .unwrap(),
@@ -476,7 +476,7 @@ mod tests {
             exprs: vec![],
         };
         let sequence = DmlMeta::sequenced(
-            Sequence::new(1, SequenceNumber::new(2)),
+            Sequence::new(KafkaPartition::new(1), SequenceNumber::new(2)),
             TEST_TIME
                 .checked_sub(Duration::from_millis(write_time))
                 .unwrap(),

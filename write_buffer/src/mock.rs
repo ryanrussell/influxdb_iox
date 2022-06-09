@@ -3,7 +3,7 @@ use crate::{
     core::{WriteBufferError, WriteBufferReading, WriteBufferStreamHandler, WriteBufferWriting},
 };
 use async_trait::async_trait;
-use data_types::{Sequence, SequenceNumber};
+use data_types::{KafkaPartition, Sequence, SequenceNumber};
 use dml::{DmlDelete, DmlMeta, DmlOperation, DmlWrite};
 use futures::{stream::BoxStream, StreamExt};
 use iox_time::TimeProvider;
@@ -67,7 +67,7 @@ pub struct MockBufferSharedState {
     /// Lock-protected entries.
     ///
     /// The inner `Option` is `None` if the sequencers are not created yet.
-    writes: Arc<Mutex<Option<BTreeMap<u32, WriteResVec>>>>,
+    writes: Arc<Mutex<Option<BTreeMap<KafkaPartition, WriteResVec>>>>,
 }
 
 impl MockBufferSharedState {
@@ -103,9 +103,12 @@ impl MockBufferSharedState {
         *guard = Some(Self::init_inner(n_sequencers));
     }
 
-    fn init_inner(n_sequencers: NonZeroU32) -> BTreeMap<u32, WriteResVec> {
+    fn init_inner(n_sequencers: NonZeroU32) -> BTreeMap<KafkaPartition, WriteResVec> {
         (0..n_sequencers.get())
-            .map(|sequencer_id| (sequencer_id, Default::default()))
+            .map(|kafka_partition| {
+                let kafka_partition = KafkaPartition::new(kafka_partition.try_into().unwrap());
+                (kafka_partition, Default::default())
+            })
             .collect()
     }
 
@@ -151,7 +154,7 @@ impl MockBufferSharedState {
         let mut guard = self.writes.lock();
         let writes = guard.as_mut().expect("no sequencers initialized");
         let writes_vec = writes
-            .get_mut(&sequence.sequencer_id)
+            .get_mut(&sequence.kafka_partition)
             .expect("invalid sequencer ID");
 
         if let Some(max_sequence_number) = writes_vec.max_seqno {
@@ -179,11 +182,11 @@ impl MockBufferSharedState {
     ///
     /// - when no sequencer was initialized
     /// - when sequencer does not exist
-    pub fn push_error(&self, error: WriteBufferError, sequencer_id: u32) {
+    pub fn push_error(&self, error: WriteBufferError, kafka_partition: KafkaPartition) {
         let mut guard = self.writes.lock();
         let entries = guard.as_mut().expect("no sequencers initialized");
         let entry_vec = entries
-            .get_mut(&sequencer_id)
+            .get_mut(&kafka_partition)
             .expect("invalid sequencer ID");
 
         entry_vec.push(Err(error));
@@ -195,10 +198,15 @@ impl MockBufferSharedState {
     ///
     /// - when no sequencer was initialized
     /// - when sequencer does not exist
-    pub fn get_messages(&self, sequencer_id: u32) -> Vec<Result<DmlOperation, WriteBufferError>> {
+    pub fn get_messages(
+        &self,
+        kafka_partition: KafkaPartition,
+    ) -> Vec<Result<DmlOperation, WriteBufferError>> {
         let mut guard = self.writes.lock();
         let writes = guard.as_mut().expect("no sequencers initialized");
-        let writes_vec = writes.get_mut(&sequencer_id).expect("invalid sequencer ID");
+        let writes_vec = writes
+            .get_mut(&kafka_partition)
+            .expect("invalid sequencer ID");
 
         writes_vec
             .writes
@@ -216,10 +224,12 @@ impl MockBufferSharedState {
     ///
     /// - when no sequencer was initialized
     /// - when sequencer does not exist
-    pub fn clear_messages(&self, sequencer_id: u32) {
+    pub fn clear_messages(&self, kafka_partition: KafkaPartition) {
         let mut guard = self.writes.lock();
         let writes = guard.as_mut().expect("no sequencers initialized");
-        let writes_vec = writes.get_mut(&sequencer_id).expect("invalid sequencer ID");
+        let writes_vec = writes
+            .get_mut(&kafka_partition)
+            .expect("invalid sequencer ID");
 
         std::mem::take(writes_vec);
     }
@@ -268,7 +278,7 @@ impl MockBufferForWriting {
 
 #[async_trait]
 impl WriteBufferWriting for MockBufferForWriting {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
         let mut guard = self.state.writes.lock();
         let entries = guard.as_mut().unwrap();
         entries.keys().copied().collect()
@@ -276,21 +286,21 @@ impl WriteBufferWriting for MockBufferForWriting {
 
     async fn store_operation(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         operation: &DmlOperation,
     ) -> Result<DmlMeta, WriteBufferError> {
         let mut guard = self.state.writes.lock();
         let writes = guard.as_mut().unwrap();
         let writes_vec = writes
-            .get_mut(&sequencer_id)
+            .get_mut(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown sequencer: {}", sequencer_id).into()
+                format!("Unknown sequencer: {}", kafka_partition).into()
             })?;
 
         let sequence_number = writes_vec.max_seqno.map(|n| n + 1).unwrap_or(0);
 
         let sequence = Sequence {
-            sequencer_id,
+            kafka_partition,
             sequence_number: SequenceNumber::new(sequence_number),
         };
 
@@ -330,13 +340,13 @@ pub struct MockBufferForWritingThatAlwaysErrors;
 
 #[async_trait]
 impl WriteBufferWriting for MockBufferForWritingThatAlwaysErrors {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
-        IntoIterator::into_iter([0]).collect()
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
+        IntoIterator::into_iter([KafkaPartition::new(0)]).collect()
     }
 
     async fn store_operation(
         &self,
-        _sequencer_id: u32,
+        _kafka_partition: KafkaPartition,
         _operation: &DmlOperation,
     ) -> Result<DmlMeta, WriteBufferError> {
         Err(String::from(
@@ -358,7 +368,7 @@ impl WriteBufferWriting for MockBufferForWritingThatAlwaysErrors {
 #[derive(Debug)]
 pub struct MockBufferForReading {
     shared_state: Arc<MockBufferSharedState>,
-    n_sequencers: u32,
+    n_sequencers: i32,
 }
 
 impl MockBufferForReading {
@@ -376,7 +386,7 @@ impl MockBufferForReading {
                     return Err("no sequencers initialized".to_string().into());
                 }
             };
-            entries.len() as u32
+            entries.len() as i32
         };
 
         Ok(Self {
@@ -393,7 +403,7 @@ pub struct MockBufferStreamHandler {
     shared_state: Arc<MockBufferSharedState>,
 
     /// Own sequencer ID.
-    sequencer_id: u32,
+    kafka_partition: KafkaPartition,
 
     /// Index within the entry vector.
     vector_index: Arc<AtomicUsize>,
@@ -411,7 +421,7 @@ impl WriteBufferStreamHandler for MockBufferStreamHandler {
         // Don't reference `self` in the closure, move these instead
         let terminated = Arc::clone(&self.terminated);
         let shared_state = Arc::clone(&self.shared_state);
-        let sequencer_id = self.sequencer_id;
+        let kafka_partition = self.kafka_partition;
         let vector_index = Arc::clone(&self.vector_index);
         let offset = self.offset;
 
@@ -422,7 +432,7 @@ impl WriteBufferStreamHandler for MockBufferStreamHandler {
 
             let mut guard = shared_state.writes.lock();
             let writes = guard.as_mut().unwrap();
-            let writes_vec = writes.get_mut(&sequencer_id).unwrap();
+            let writes_vec = writes.get_mut(&kafka_partition).unwrap();
 
             let entries = &writes_vec.writes;
             let mut vi = vector_index.load(SeqCst);
@@ -502,21 +512,24 @@ impl WriteBufferStreamHandler for MockBufferStreamHandler {
 
 #[async_trait]
 impl WriteBufferReading for MockBufferForReading {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
-        (0..self.n_sequencers).into_iter().collect()
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
+        (0..self.n_sequencers)
+            .into_iter()
+            .map(KafkaPartition::new)
+            .collect()
     }
 
     async fn stream_handler(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<Box<dyn WriteBufferStreamHandler>, WriteBufferError> {
-        if sequencer_id >= self.n_sequencers {
-            return Err(format!("Unknown sequencer: {}", sequencer_id).into());
+        if kafka_partition.get() >= self.n_sequencers {
+            return Err(format!("Unknown sequencer: {}", kafka_partition).into());
         }
 
         Ok(Box::new(MockBufferStreamHandler {
             shared_state: Arc::clone(&self.shared_state),
-            sequencer_id,
+            kafka_partition,
             vector_index: Arc::new(AtomicUsize::new(0)),
             offset: 0,
             terminated: Arc::new(AtomicBool::new(false)),
@@ -525,14 +538,14 @@ impl WriteBufferReading for MockBufferForReading {
 
     async fn fetch_high_watermark(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<SequenceNumber, WriteBufferError> {
         let guard = self.shared_state.writes.lock();
         let entries = guard.as_ref().unwrap();
         let entry_vec = entries
-            .get(&sequencer_id)
+            .get(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown sequencer: {}", sequencer_id).into()
+                format!("Unknown sequencer: {}", kafka_partition).into()
             })?;
         let watermark = entry_vec.max_seqno.map(|n| n + 1).unwrap_or(0);
 
@@ -573,20 +586,20 @@ impl WriteBufferStreamHandler for MockStreamHandlerThatAlwaysErrors {
 
 #[async_trait]
 impl WriteBufferReading for MockBufferForReadingThatAlwaysErrors {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
-        BTreeSet::from([0])
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
+        BTreeSet::from([KafkaPartition::new(0)])
     }
 
     async fn stream_handler(
         &self,
-        _sequencer_id: u32,
+        _kafka_partition: KafkaPartition,
     ) -> Result<Box<dyn WriteBufferStreamHandler>, WriteBufferError> {
         Ok(Box::new(MockStreamHandlerThatAlwaysErrors {}))
     }
 
     async fn fetch_high_watermark(
         &self,
-        _sequencer_id: u32,
+        _kafka_partition: KafkaPartition,
     ) -> Result<SequenceNumber, WriteBufferError> {
         Err(String::from("Something bad happened while fetching the high watermark").into())
     }
@@ -693,7 +706,7 @@ mod tests {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(2).unwrap());
         state.push_lp(
-            Sequence::new(2, SequenceNumber::new(0)),
+            Sequence::new(KafkaPartition::new(2), SequenceNumber::new(0)),
             "upc,region=east user=1 100",
         );
     }
@@ -703,7 +716,7 @@ mod tests {
     fn test_state_push_write_panic_uninitialized() {
         let state = MockBufferSharedState::uninitialized();
         state.push_lp(
-            Sequence::new(0, SequenceNumber::new(0)),
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(0)),
             "upc,region=east user=1 100",
         );
     }
@@ -716,11 +729,11 @@ mod tests {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(2).unwrap());
         state.push_lp(
-            Sequence::new(0, SequenceNumber::new(13)),
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(13)),
             "upc,region=east user=1 100",
         );
         state.push_lp(
-            Sequence::new(0, SequenceNumber::new(13)),
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(13)),
             "upc,region=east user=1 100",
         );
     }
@@ -733,11 +746,11 @@ mod tests {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(2).unwrap());
         state.push_lp(
-            Sequence::new(0, SequenceNumber::new(13)),
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(13)),
             "upc,region=east user=1 100",
         );
         state.push_lp(
-            Sequence::new(0, SequenceNumber::new(12)),
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(12)),
             "upc,region=east user=1 100",
         );
     }
@@ -748,7 +761,7 @@ mod tests {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(2).unwrap());
         let error = "foo".to_string().into();
-        state.push_error(error, 2);
+        state.push_error(error, KafkaPartition::new(2));
     }
 
     #[test]
@@ -756,7 +769,7 @@ mod tests {
     fn test_state_push_error_panic_uninitialized() {
         let state = MockBufferSharedState::uninitialized();
         let error = "foo".to_string().into();
-        state.push_error(error, 0);
+        state.push_error(error, KafkaPartition::new(0));
     }
 
     #[test]
@@ -764,14 +777,14 @@ mod tests {
     fn test_state_get_messages_panic_wrong_sequencer() {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(2).unwrap());
-        state.get_messages(2);
+        state.get_messages(KafkaPartition::new(2));
     }
 
     #[test]
     #[should_panic(expected = "no sequencers initialized")]
     fn test_state_get_messages_panic_uninitialized() {
         let state = MockBufferSharedState::uninitialized();
-        state.get_messages(0);
+        state.get_messages(KafkaPartition::new(0));
     }
 
     #[test]
@@ -779,14 +792,14 @@ mod tests {
     fn test_state_clear_messages_panic_wrong_sequencer() {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(2).unwrap());
-        state.clear_messages(2);
+        state.clear_messages(KafkaPartition::new(2));
     }
 
     #[test]
     #[should_panic(expected = "no sequencers initialized")]
     fn test_state_clear_messages_panic_uninitialized() {
         let state = MockBufferSharedState::uninitialized();
-        state.clear_messages(0);
+        state.clear_messages(KafkaPartition::new(0));
     }
 
     #[test]
@@ -794,16 +807,22 @@ mod tests {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(2).unwrap());
 
-        state.push_lp(Sequence::new(0, SequenceNumber::new(11)), "upc user=1 100");
-        state.push_lp(Sequence::new(1, SequenceNumber::new(12)), "upc user=1 100");
+        state.push_lp(
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(11)),
+            "upc user=1 100",
+        );
+        state.push_lp(
+            Sequence::new(KafkaPartition::new(1), SequenceNumber::new(12)),
+            "upc user=1 100",
+        );
 
-        assert_eq!(state.get_messages(0).len(), 1);
-        assert_eq!(state.get_messages(1).len(), 1);
+        assert_eq!(state.get_messages(KafkaPartition::new(0)).len(), 1);
+        assert_eq!(state.get_messages(KafkaPartition::new(1)).len(), 1);
 
-        state.clear_messages(0);
+        state.clear_messages(KafkaPartition::new(0));
 
-        assert_eq!(state.get_messages(0).len(), 0);
-        assert_eq!(state.get_messages(1).len(), 1);
+        assert_eq!(state.get_messages(KafkaPartition::new(0)).len(), 0);
+        assert_eq!(state.get_messages(KafkaPartition::new(1)).len(), 1);
     }
 
     #[tokio::test]
@@ -812,14 +831,14 @@ mod tests {
 
         assert_contains!(
             reader
-                .fetch_high_watermark(0)
+                .fetch_high_watermark(KafkaPartition::new(0))
                 .await
                 .unwrap_err()
                 .to_string(),
             "Something bad happened while fetching the high watermark"
         );
 
-        let mut stream_handler = reader.stream_handler(0).await.unwrap();
+        let mut stream_handler = reader.stream_handler(KafkaPartition::new(0)).await.unwrap();
 
         assert_contains!(
             stream_handler
@@ -852,7 +871,7 @@ mod tests {
 
         assert_contains!(
             writer
-                .store_operation(0, &operation)
+                .store_operation(KafkaPartition::new(0), &operation)
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -865,21 +884,24 @@ mod tests {
         let state = MockBufferSharedState::uninitialized();
         state.init(NonZeroU32::try_from(2).unwrap());
 
-        state.push_lp(Sequence::new(0, SequenceNumber::new(11)), "upc user=1 100");
+        state.push_lp(
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(11)),
+            "upc user=1 100",
+        );
 
-        assert_eq!(state.get_messages(0).len(), 1);
-        assert_eq!(state.get_messages(1).len(), 0);
+        assert_eq!(state.get_messages(KafkaPartition::new(0)).len(), 1);
+        assert_eq!(state.get_messages(KafkaPartition::new(1)).len(), 0);
 
         let error = "foo".to_string().into();
-        state.push_error(error, 1);
+        state.push_error(error, KafkaPartition::new(1));
 
-        assert_eq!(state.get_messages(0).len(), 1);
-        assert_eq!(state.get_messages(1).len(), 1);
+        assert_eq!(state.get_messages(KafkaPartition::new(0)).len(), 1);
+        assert_eq!(state.get_messages(KafkaPartition::new(1)).len(), 1);
 
-        state.clear_messages(0);
+        state.clear_messages(KafkaPartition::new(0));
 
-        assert_eq!(state.get_messages(0).len(), 0);
-        assert_eq!(state.get_messages(1).len(), 1);
+        assert_eq!(state.get_messages(KafkaPartition::new(0)).len(), 0);
+        assert_eq!(state.get_messages(KafkaPartition::new(1)).len(), 1);
     }
 
     #[test]
@@ -903,14 +925,17 @@ mod tests {
         let state =
             MockBufferSharedState::empty_with_n_sequencers(NonZeroU32::try_from(1).unwrap());
 
-        state.push_lp(Sequence::new(0, SequenceNumber::new(0)), "mem foo=1 10");
+        state.push_lp(
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(0)),
+            "mem foo=1 10",
+        );
 
         let read = MockBufferForReading::new(state.clone(), None).unwrap();
 
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let barrier_captured = Arc::clone(&barrier);
         let consumer = tokio::spawn(async move {
-            let mut stream_handler = read.stream_handler(0).await.unwrap();
+            let mut stream_handler = read.stream_handler(KafkaPartition::new(0)).await.unwrap();
             let mut stream = stream_handler.stream().await;
             stream.next().await.unwrap().unwrap();
             barrier_captured.wait().await;
@@ -920,7 +945,10 @@ mod tests {
         // Wait for consumer to read first entry
         barrier.wait().await;
 
-        state.push_lp(Sequence::new(0, SequenceNumber::new(1)), "mem foo=2 20");
+        state.push_lp(
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(1)),
+            "mem foo=2 20",
+        );
 
         tokio::time::timeout(Duration::from_millis(100), consumer)
             .await

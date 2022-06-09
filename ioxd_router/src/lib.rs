@@ -310,7 +310,7 @@ async fn init_write_buffer(
     // The sort order must be deterministic in order for all nodes to shard to
     // the same sequencers, therefore we type assert the returned set is of the
     // ordered variety.
-    let shards: BTreeSet<_> = write_buffer.sequencer_ids();
+    let shards: BTreeSet<_> = write_buffer.kafka_partitions();
     //          ^ don't change this to an unordered set
 
     info!(

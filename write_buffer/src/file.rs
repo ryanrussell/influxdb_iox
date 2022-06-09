@@ -129,7 +129,7 @@ use crate::{
     core::{WriteBufferError, WriteBufferReading, WriteBufferStreamHandler, WriteBufferWriting},
 };
 use async_trait::async_trait;
-use data_types::{Sequence, SequenceNumber};
+use data_types::{KafkaPartition, Sequence, SequenceNumber};
 use dml::{DmlMeta, DmlOperation};
 use futures::{stream::BoxStream, Stream, StreamExt};
 use iox_time::{Time, TimeProvider};
@@ -155,7 +155,7 @@ pub const HEADER_TIME: &str = "last-modified";
 #[derive(Debug)]
 pub struct FileBufferProducer {
     db_name: String,
-    dirs: BTreeMap<u32, PathBuf>,
+    dirs: BTreeMap<KafkaPartition, PathBuf>,
     time_provider: Arc<dyn TimeProvider>,
 }
 
@@ -179,20 +179,20 @@ impl FileBufferProducer {
 
 #[async_trait]
 impl WriteBufferWriting for FileBufferProducer {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
         self.dirs.keys().cloned().collect()
     }
 
     async fn store_operation(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         operation: &DmlOperation,
     ) -> Result<DmlMeta, WriteBufferError> {
         let sequencer_path = self
             .dirs
-            .get(&sequencer_id)
+            .get(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown sequencer: {}", sequencer_id).into()
+                format!("Unknown sequencer: {}", kafka_partition).into()
             })?;
 
         // measure time
@@ -257,7 +257,7 @@ impl WriteBufferWriting for FileBufferProducer {
         tokio::fs::remove_file(&temp_file).await.ok();
 
         Ok(DmlMeta::sequenced(
-            Sequence::new(sequencer_id, SequenceNumber::new(sequence_number)),
+            Sequence::new(kafka_partition, SequenceNumber::new(sequence_number)),
             now,
             operation.meta().span_context().cloned(),
             message.len(),
@@ -276,7 +276,7 @@ impl WriteBufferWriting for FileBufferProducer {
 
 #[derive(Debug)]
 pub struct FileBufferStreamHandler {
-    sequencer_id: u32,
+    kafka_partition: KafkaPartition,
     path: PathBuf,
     next_sequence_number: Arc<AtomicI64>,
     terminated: Arc<AtomicBool>,
@@ -289,7 +289,7 @@ impl WriteBufferStreamHandler for FileBufferStreamHandler {
         let committed = self.path.join("committed");
 
         ConsumerStream::new(
-            self.sequencer_id,
+            self.kafka_partition,
             committed,
             Arc::clone(&self.next_sequence_number),
             Arc::clone(&self.terminated),
@@ -314,7 +314,7 @@ impl WriteBufferStreamHandler for FileBufferStreamHandler {
 /// File-based write buffer reader.
 #[derive(Debug)]
 pub struct FileBufferConsumer {
-    dirs: BTreeMap<u32, (PathBuf, Arc<AtomicU64>)>,
+    dirs: BTreeMap<KafkaPartition, (PathBuf, Arc<AtomicU64>)>,
     trace_collector: Option<Arc<dyn TraceCollector>>,
 }
 
@@ -331,7 +331,7 @@ impl FileBufferConsumer {
         let dirs = maybe_auto_create_directories(&root, creation_config)
             .await?
             .into_iter()
-            .map(|(sequencer_id, path)| (sequencer_id, (path, Arc::new(AtomicU64::new(0)))))
+            .map(|(kafka_partition, path)| (kafka_partition, (path, Arc::new(AtomicU64::new(0)))))
             .collect();
         Ok(Self {
             dirs,
@@ -342,23 +342,23 @@ impl FileBufferConsumer {
 
 #[async_trait]
 impl WriteBufferReading for FileBufferConsumer {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
         self.dirs.keys().copied().collect()
     }
 
     async fn stream_handler(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<Box<dyn WriteBufferStreamHandler>, WriteBufferError> {
         let (path, _next_sequence_number) = self
             .dirs
-            .get(&sequencer_id)
+            .get(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown sequencer: {}", sequencer_id).into()
+                format!("Unknown sequencer: {}", kafka_partition).into()
             })?;
 
         Ok(Box::new(FileBufferStreamHandler {
-            sequencer_id,
+            kafka_partition,
             path: path.clone(),
             next_sequence_number: Arc::new(AtomicI64::new(0)),
             terminated: Arc::new(AtomicBool::new(false)),
@@ -368,13 +368,13 @@ impl WriteBufferReading for FileBufferConsumer {
 
     async fn fetch_high_watermark(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<SequenceNumber, WriteBufferError> {
         let (path, _next_sequence_number) = self
             .dirs
-            .get(&sequencer_id)
+            .get(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown sequencer: {}", sequencer_id).into()
+                format!("Unknown sequencer: {}", kafka_partition).into()
             })?;
         let committed = path.join("committed");
 
@@ -390,7 +390,7 @@ impl WriteBufferReading for FileBufferConsumer {
 #[pin_project]
 struct ConsumerStream {
     fut: ReusableBoxFuture<'static, Option<Result<DmlOperation, WriteBufferError>>>,
-    sequencer_id: u32,
+    kafka_partition: KafkaPartition,
     path: PathBuf,
     next_sequence_number: Arc<AtomicI64>,
     terminated: Arc<AtomicBool>,
@@ -399,7 +399,7 @@ struct ConsumerStream {
 
 impl ConsumerStream {
     fn new(
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         path: PathBuf,
         next_sequence_number: Arc<AtomicI64>,
         terminated: Arc<AtomicBool>,
@@ -407,13 +407,13 @@ impl ConsumerStream {
     ) -> Self {
         Self {
             fut: ReusableBoxFuture::new(Self::poll_next_inner(
-                sequencer_id,
+                kafka_partition,
                 path.clone(),
                 Arc::clone(&next_sequence_number),
                 Arc::clone(&terminated),
                 trace_collector.clone(),
             )),
-            sequencer_id,
+            kafka_partition,
             path,
             next_sequence_number,
             terminated,
@@ -422,7 +422,7 @@ impl ConsumerStream {
     }
 
     async fn poll_next_inner(
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         path: PathBuf,
         next_sequence_number: Arc<AtomicI64>,
         terminated: Arc<AtomicBool>,
@@ -441,7 +441,7 @@ impl ConsumerStream {
                 Ok(data) => {
                     // decode file
                     let sequence = Sequence {
-                        sequencer_id,
+                        kafka_partition,
                         sequence_number: SequenceNumber::new(sequence_number),
                     };
                     match Self::decode_file(data, sequence, trace_collector.clone()) {
@@ -575,7 +575,7 @@ impl Stream for ConsumerStream {
         match this.fut.poll(cx) {
             std::task::Poll::Ready(res) => {
                 this.fut.set(Self::poll_next_inner(
-                    *this.sequencer_id,
+                    *this.kafka_partition,
                     this.path.clone(),
                     Arc::clone(this.next_sequence_number),
                     Arc::clone(this.terminated),
@@ -591,7 +591,7 @@ impl Stream for ConsumerStream {
 async fn maybe_auto_create_directories(
     root: &Path,
     creation_config: Option<&WriteBufferCreationConfig>,
-) -> Result<BTreeMap<u32, PathBuf>, WriteBufferError> {
+) -> Result<BTreeMap<KafkaPartition, PathBuf>, WriteBufferError> {
     loop {
         // figure out if a active version exists
         let active = root.join("active");
@@ -604,6 +604,10 @@ async fn maybe_auto_create_directories(
                     .to_string()
                     .into());
             }
+            let directories = directories
+                .into_iter()
+                .map(|(key, value)| (KafkaPartition::new(key), value))
+                .collect();
             return Ok(directories);
         }
 
@@ -614,8 +618,8 @@ async fn maybe_auto_create_directories(
             tokio::fs::create_dir_all(&version).await?;
 
             let mut directories = BTreeMap::new();
-            for sequencer_id in 0..creation_config.n_sequencers.get() {
-                let sequencer_path_in_version = version.join(sequencer_id.to_string());
+            for kafka_partition in 0..creation_config.n_sequencers.get() {
+                let sequencer_path_in_version = version.join(kafka_partition.to_string());
                 tokio::fs::create_dir(&sequencer_path_in_version).await?;
 
                 let committed = sequencer_path_in_version.join("committed");
@@ -624,8 +628,12 @@ async fn maybe_auto_create_directories(
                 let temp = sequencer_path_in_version.join("temp");
                 tokio::fs::create_dir(&temp).await?;
 
-                let sequencer_path_in_active = active.join(sequencer_id.to_string());
-                directories.insert(sequencer_id, sequencer_path_in_active);
+                let sequencer_path_in_active = active.join(kafka_partition.to_string());
+                let kafka_partition: i32 = kafka_partition.try_into().unwrap();
+                directories.insert(
+                    KafkaPartition::new(kafka_partition),
+                    sequencer_path_in_active,
+                );
             }
 
             // A symlink target is resolved relative to the parent directory of
@@ -683,12 +691,12 @@ where
             }
         }
 
-        if let Some(sequencer_id) = path
+        if let Some(kafka_partition) = path
             .file_name()
             .and_then(|p| p.to_str())
             .and_then(|p| p.parse::<T>().ok())
         {
-            results.insert(sequencer_id, path);
+            results.insert(kafka_partition, path);
         } else {
             return Err(format!("Cannot parse '{}'", path.display()).into());
         }
@@ -706,20 +714,20 @@ async fn watermark(path: &Path) -> Result<i64, WriteBufferError> {
 pub mod test_utils {
     use std::path::Path;
 
-    use data_types::SequenceNumber;
+    use data_types::{KafkaPartition, SequenceNumber};
 
     /// Remove specific entry from write buffer.
     pub async fn remove_entry(
         write_buffer_path: &Path,
         database_name: &str,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         sequence_number: SequenceNumber,
     ) {
         tokio::fs::remove_file(
             write_buffer_path
                 .join(database_name)
                 .join("active")
-                .join(sequencer_id.to_string())
+                .join(kafka_partition.to_string())
                 .join("committed")
                 .join(sequence_number.get().to_string()),
         )
@@ -830,34 +838,34 @@ mod tests {
         let ctx = adapter.new_context(NonZeroU32::new(1).unwrap()).await;
 
         let writer = ctx.writing(true).await.unwrap();
-        let sequencer_id = writer.sequencer_ids().into_iter().next().unwrap();
+        let kafka_partition = writer.kafka_partitions().into_iter().next().unwrap();
         let entry_1 = "upc,region=east user=1 100";
         let entry_2 = "upc,region=east user=2 200";
         let entry_3 = "upc,region=east user=3 300";
         let entry_4 = "upc,region=east user=4 400";
 
-        let w1 = write(&ctx.database_name, &writer, entry_1, sequencer_id, None).await;
-        let w2 = write(&ctx.database_name, &writer, entry_2, sequencer_id, None).await;
-        let w3 = write(&ctx.database_name, &writer, entry_3, sequencer_id, None).await;
-        let w4 = write(&ctx.database_name, &writer, entry_4, sequencer_id, None).await;
+        let w1 = write(&ctx.database_name, &writer, entry_1, kafka_partition, None).await;
+        let w2 = write(&ctx.database_name, &writer, entry_2, kafka_partition, None).await;
+        let w3 = write(&ctx.database_name, &writer, entry_3, kafka_partition, None).await;
+        let w4 = write(&ctx.database_name, &writer, entry_4, kafka_partition, None).await;
 
         remove_entry(
             &ctx.path,
             &ctx.database_name,
-            sequencer_id,
+            kafka_partition,
             w2.meta().sequence().unwrap().sequence_number,
         )
         .await;
         remove_entry(
             &ctx.path,
             &ctx.database_name,
-            sequencer_id,
+            kafka_partition,
             w3.meta().sequence().unwrap().sequence_number,
         )
         .await;
 
         let reader = ctx.reading(true).await.unwrap();
-        let mut handler = reader.stream_handler(sequencer_id).await.unwrap();
+        let mut handler = reader.stream_handler(kafka_partition).await.unwrap();
         let mut stream = handler.stream().await;
 
         assert_write_op_eq(&stream.next().await.unwrap().unwrap(), &w1);
@@ -870,23 +878,23 @@ mod tests {
         let ctx = adapter.new_context(NonZeroU32::new(1).unwrap()).await;
 
         let writer = ctx.writing(true).await.unwrap();
-        let sequencer_id = writer.sequencer_ids().into_iter().next().unwrap();
+        let kafka_partition = writer.kafka_partitions().into_iter().next().unwrap();
         let entry_1 = "upc,region=east user=1 100";
         let entry_2 = "upc,region=east user=2 200";
 
-        let w1 = write(&ctx.database_name, &writer, entry_1, sequencer_id, None).await;
-        let w2 = write(&ctx.database_name, &writer, entry_2, sequencer_id, None).await;
+        let w1 = write(&ctx.database_name, &writer, entry_1, kafka_partition, None).await;
+        let w2 = write(&ctx.database_name, &writer, entry_2, kafka_partition, None).await;
 
         remove_entry(
             &ctx.path,
             &ctx.database_name,
-            sequencer_id,
+            kafka_partition,
             w1.meta().sequence().unwrap().sequence_number,
         )
         .await;
 
         let reader = ctx.reading(true).await.unwrap();
-        let mut handler = reader.stream_handler(sequencer_id).await.unwrap();
+        let mut handler = reader.stream_handler(kafka_partition).await.unwrap();
         let mut stream = handler.stream().await;
 
         assert_write_op_eq(&stream.next().await.unwrap().unwrap(), &w2);

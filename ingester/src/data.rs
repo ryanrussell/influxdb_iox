@@ -1695,7 +1695,7 @@ mod tests {
             "foo",
             lines_to_batches("mem foo=1 10", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(1, SequenceNumber::new(1)),
+                Sequence::new(KafkaPartition::new(1), SequenceNumber::new(1)),
                 ignored_ts,
                 None,
                 50,
@@ -1788,7 +1788,7 @@ mod tests {
             "foo",
             lines_to_batches("mem foo=1 10", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(1, SequenceNumber::new(1)),
+                Sequence::new(KafkaPartition::new(1), SequenceNumber::new(1)),
                 ignored_ts,
                 None,
                 50,
@@ -1803,7 +1803,7 @@ mod tests {
             "foo",
             lines_to_batches("cpu foo=1 10", 1).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(2, SequenceNumber::new(1)),
+                Sequence::new(KafkaPartition::new(2), SequenceNumber::new(1)),
                 ignored_ts,
                 None,
                 50,
@@ -1820,7 +1820,7 @@ mod tests {
             "foo",
             lines_to_batches("mem foo=1 30", 2).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(1, SequenceNumber::new(2)),
+                Sequence::new(KafkaPartition::new(1), SequenceNumber::new(2)),
                 ignored_ts,
                 None,
                 50,
@@ -2207,7 +2207,7 @@ mod tests {
             "foo",
             lines_to_batches("mem foo=1 10", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(1, SequenceNumber::new(1)),
+                Sequence::new(KafkaPartition::new(1), SequenceNumber::new(1)),
                 ignored_ts,
                 None,
                 50,
@@ -2217,7 +2217,7 @@ mod tests {
             "foo",
             lines_to_batches("mem foo=1 10", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(1, SequenceNumber::new(2)),
+                Sequence::new(KafkaPartition::new(1), SequenceNumber::new(2)),
                 ignored_ts,
                 None,
                 50,
@@ -2389,7 +2389,7 @@ mod tests {
             "foo",
             lines_to_batches("mem foo=1 10", 0).unwrap(),
             DmlMeta::sequenced(
-                Sequence::new(1, SequenceNumber::new(1)),
+                Sequence::new(KafkaPartition::new(1), SequenceNumber::new(1)),
                 ignored_ts,
                 None,
                 50,
@@ -2444,7 +2444,7 @@ mod tests {
             predicate,
             Some(NonEmptyString::new("mem").unwrap()),
             DmlMeta::sequenced(
-                Sequence::new(1, SequenceNumber::new(2)),
+                Sequence::new(KafkaPartition::new(1), SequenceNumber::new(2)),
                 ignored_ts,
                 None,
                 1337,

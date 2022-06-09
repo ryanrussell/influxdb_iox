@@ -5,8 +5,8 @@ use arrow_util::optimize::{optimize_record_batch, optimize_schema};
 use async_trait::async_trait;
 use backoff::BackoffConfig;
 use data_types::{
-    DeletePredicate, NonEmptyString, PartitionId, Sequence, SequenceNumber, SequencerId,
-    TombstoneId,
+    DeletePredicate, KafkaPartition, NonEmptyString, PartitionId, Sequence, SequenceNumber,
+    SequencerId, TombstoneId,
 };
 use datafusion::physical_plan::RecordBatchStream;
 use datafusion_util::MemoryStream;
@@ -775,8 +775,16 @@ impl MockIngester {
         let sequence_number = self.next_sequence_number();
         self.partition_keys
             .insert(sequence_number, partition_key.to_string());
+        let kafka_partition = KafkaPartition::new(
+            self.sequencer
+                .sequencer
+                .id
+                .get()
+                .try_into()
+                .expect("invalid sequencer id"),
+        );
         let meta = DmlMeta::sequenced(
-            Sequence::new(self.sequencer.sequencer.id.get() as u32, sequence_number),
+            Sequence::new(kafka_partition, sequence_number),
             self.catalog.time_provider().now(),
             None,
             0,
@@ -799,8 +807,16 @@ impl MockIngester {
         self.ns.create_table(delete_table_name).await;
 
         let sequence_number = self.next_sequence_number();
+        let kafka_partition = KafkaPartition::new(
+            self.sequencer
+                .sequencer
+                .id
+                .get()
+                .try_into()
+                .expect("invalid sequencer id"),
+        );
         let meta = DmlMeta::sequenced(
-            Sequence::new(self.sequencer.sequencer.id.get() as u32, sequence_number),
+            Sequence::new(kafka_partition, sequence_number),
             self.catalog.time_provider().now(),
             None,
             0,

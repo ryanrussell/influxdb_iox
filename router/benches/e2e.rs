@@ -33,7 +33,7 @@ fn init_write_buffer(n_sequencers: u32) -> ShardedWriteBuffer<JumpHash<Arc<Seque
         .expect("failed to init mock write buffer"),
     );
 
-    let shards: BTreeSet<_> = write_buffer.sequencer_ids();
+    let shards: BTreeSet<_> = write_buffer.kafka_partitions();
     ShardedWriteBuffer::new(
         shards
             .into_iter()

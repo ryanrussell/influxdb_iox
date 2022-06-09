@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use data_types::SequenceNumber;
+use data_types::{KafkaPartition, SequenceNumber};
 use dml::{DmlMeta, DmlOperation, DmlWrite};
 use futures::stream::BoxStream;
 
@@ -131,7 +131,7 @@ pub trait WriteBufferWriting: Sync + Send + Debug + 'static {
     /// List all known sequencers.
     ///
     /// This set not empty.
-    fn sequencer_ids(&self) -> BTreeSet<u32>;
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition>;
 
     /// Send a [`DmlOperation`] to the write buffer using the specified sequencer ID.
     ///
@@ -146,14 +146,14 @@ pub trait WriteBufferWriting: Sync + Send + Debug + 'static {
     /// Returns the metadata that was written.
     async fn store_operation(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         operation: &DmlOperation,
     ) -> Result<DmlMeta, WriteBufferError>;
 
     /// Sends line protocol to the write buffer - primarily intended for testing
     async fn store_lp(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         lp: &str,
         default_time: i64,
     ) -> Result<DmlMeta, WriteBufferError> {
@@ -161,7 +161,7 @@ pub trait WriteBufferWriting: Sync + Send + Debug + 'static {
             .map_err(WriteBufferError::invalid_input)?;
 
         self.store_operation(
-            sequencer_id,
+            kafka_partition,
             &DmlOperation::Write(DmlWrite::new("test_db", tables, Default::default())),
         )
         .await
@@ -231,24 +231,24 @@ pub trait WriteBufferReading: Sync + Send + Debug + 'static {
     /// List all known sequencers.
     ///
     /// This set not empty.
-    fn sequencer_ids(&self) -> BTreeSet<u32>;
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition>;
 
     /// Get stream handler for a dedicated sequencer.
     ///
     /// Handlers do NOT share any state (e.g. last sequence number).
     async fn stream_handler(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<Box<dyn WriteBufferStreamHandler>, WriteBufferError>;
 
     /// Get stream handlers for all stream.
     async fn stream_handlers(
         &self,
-    ) -> Result<BTreeMap<u32, Box<dyn WriteBufferStreamHandler>>, WriteBufferError> {
+    ) -> Result<BTreeMap<KafkaPartition, Box<dyn WriteBufferStreamHandler>>, WriteBufferError> {
         let mut handlers = BTreeMap::new();
 
-        for sequencer_id in self.sequencer_ids() {
-            handlers.insert(sequencer_id, self.stream_handler(sequencer_id).await?);
+        for kafka_partition in self.kafka_partitions() {
+            handlers.insert(kafka_partition, self.stream_handler(kafka_partition).await?);
         }
 
         Ok(handlers)
@@ -261,7 +261,7 @@ pub trait WriteBufferReading: Sync + Send + Debug + 'static {
     /// buffer, it is 1.
     async fn fetch_high_watermark(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<SequenceNumber, WriteBufferError>;
 
     /// Return type (like `"mock"` or `"kafka"`) of this reader.
@@ -276,7 +276,7 @@ pub mod test_utils {
         WriteBufferError, WriteBufferReading, WriteBufferStreamHandler, WriteBufferWriting,
     };
     use async_trait::async_trait;
-    use data_types::SequenceNumber;
+    use data_types::{KafkaPartition, SequenceNumber};
     use dml::{test_util::assert_write_op_eq, DmlMeta, DmlOperation, DmlWrite};
     use futures::{stream::FuturesUnordered, Stream, StreamExt, TryStreamExt};
     use iox_time::{Time, TimeProvider};
@@ -359,7 +359,7 @@ pub mod test_utils {
         test_watermark(&adapter).await;
         test_timestamp(&adapter).await;
         test_sequencer_auto_creation(&adapter).await;
-        test_sequencer_ids(&adapter).await;
+        test_kafka_partitions(&adapter).await;
         test_span_context(&adapter).await;
         test_unknown_sequencer_write(&adapter).await;
         test_multi_namespaces(&adapter).await;
@@ -371,7 +371,7 @@ pub mod test_utils {
         namespace: &str,
         writer: &impl WriteBufferWriting,
         lp: &str,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         span_context: Option<&SpanContext>,
     ) -> DmlWrite {
         let tables = mutable_batch_lp::lines_to_batches(lp, 0).unwrap();
@@ -383,7 +383,7 @@ pub mod test_utils {
         let operation = DmlOperation::Write(write);
 
         let meta = writer
-            .store_operation(sequencer_id, &operation)
+            .store_operation(kafka_partition, &operation)
             .await
             .unwrap();
 
@@ -416,23 +416,23 @@ pub mod test_utils {
         let writer = context.writing(true).await.unwrap();
         let reader = context.reading(true).await.unwrap();
 
-        let sequencer_id = set_pop_first(&mut reader.sequencer_ids()).unwrap();
-        let mut stream_handler = reader.stream_handler(sequencer_id).await.unwrap();
+        let kafka_partition = set_pop_first(&mut reader.kafka_partitions()).unwrap();
+        let mut stream_handler = reader.stream_handler(kafka_partition).await.unwrap();
         let mut stream = stream_handler.stream().await;
 
         // empty stream is pending
         assert_stream_pending(&mut stream).await;
 
         // adding content allows us to get results
-        let w1 = write("namespace", &writer, entry_1, sequencer_id, None).await;
+        let w1 = write("namespace", &writer, entry_1, kafka_partition, None).await;
         assert_write_op_eq(&stream.next().await.unwrap().unwrap(), &w1);
 
         // stream is pending again
         assert_stream_pending(&mut stream).await;
 
         // adding more data unblocks the stream
-        let w2 = write("namespace", &writer, entry_2, sequencer_id, None).await;
-        let w3 = write("namespace", &writer, entry_3, sequencer_id, None).await;
+        let w2 = write("namespace", &writer, entry_2, kafka_partition, None).await;
+        let w3 = write("namespace", &writer, entry_3, kafka_partition, None).await;
 
         assert_write_op_eq(&stream.next().await.unwrap().unwrap(), &w2);
         assert_write_op_eq(&stream.next().await.unwrap().unwrap(), &w3);
@@ -460,13 +460,14 @@ pub mod test_utils {
         let writer = context.writing(true).await.unwrap();
         let reader = context.reading(true).await.unwrap();
 
-        let w1 = write("namespace", &writer, entry_1, 0, None).await;
-        let w2 = write("namespace", &writer, entry_2, 0, None).await;
-        let w3 = write("namespace", &writer, entry_3, 0, None).await;
+        let kp0 = KafkaPartition::new(0);
+        let w1 = write("namespace", &writer, entry_1, kp0, None).await;
+        let w2 = write("namespace", &writer, entry_2, kp0, None).await;
+        let w3 = write("namespace", &writer, entry_3, kp0, None).await;
 
         // creating stream, drop stream, re-create it => still starts at first entry
-        let sequencer_id = set_pop_first(&mut reader.sequencer_ids()).unwrap();
-        let mut stream_handler = reader.stream_handler(sequencer_id).await.unwrap();
+        let kafka_partition = set_pop_first(&mut reader.kafka_partitions()).unwrap();
+        let mut stream_handler = reader.stream_handler(kafka_partition).await.unwrap();
         let stream = stream_handler.stream();
         drop(stream);
         let mut stream = stream_handler.stream().await;
@@ -486,7 +487,7 @@ pub mod test_utils {
         assert_stream_pending(&mut stream).await;
 
         // use a different handler => stream starts from beginning
-        let mut stream_handler2 = reader.stream_handler(sequencer_id).await.unwrap();
+        let mut stream_handler2 = reader.stream_handler(kafka_partition).await.unwrap();
         let mut stream2 = stream_handler2.stream().await;
         assert_write_op_eq(&stream2.next().await.unwrap().unwrap(), &w1);
         assert_stream_pending(&mut stream).await;
@@ -513,14 +514,14 @@ pub mod test_utils {
         let reader = context.reading(true).await.unwrap();
 
         // check that we have two different sequencer IDs
-        let mut sequencer_ids = reader.sequencer_ids();
-        assert_eq!(sequencer_ids.len(), 2);
-        let sequencer_id_1 = set_pop_first(&mut sequencer_ids).unwrap();
-        let sequencer_id_2 = set_pop_first(&mut sequencer_ids).unwrap();
-        assert_ne!(sequencer_id_1, sequencer_id_2);
+        let mut kafka_partitions = reader.kafka_partitions();
+        assert_eq!(kafka_partitions.len(), 2);
+        let kafka_partition_1 = set_pop_first(&mut kafka_partitions).unwrap();
+        let kafka_partition_2 = set_pop_first(&mut kafka_partitions).unwrap();
+        assert_ne!(kafka_partition_1, kafka_partition_2);
 
-        let mut stream_handler_1 = reader.stream_handler(sequencer_id_1).await.unwrap();
-        let mut stream_handler_2 = reader.stream_handler(sequencer_id_2).await.unwrap();
+        let mut stream_handler_1 = reader.stream_handler(kafka_partition_1).await.unwrap();
+        let mut stream_handler_2 = reader.stream_handler(kafka_partition_2).await.unwrap();
         let mut stream_1 = stream_handler_1.stream().await;
         let mut stream_2 = stream_handler_2.stream().await;
 
@@ -529,15 +530,15 @@ pub mod test_utils {
         assert_stream_pending(&mut stream_2).await;
 
         // entries arrive at the right target stream
-        let w1 = write("namespace", &writer, entry_1, sequencer_id_1, None).await;
+        let w1 = write("namespace", &writer, entry_1, kafka_partition_1, None).await;
         assert_write_op_eq(&stream_1.next().await.unwrap().unwrap(), &w1);
         assert_stream_pending(&mut stream_2).await;
 
-        let w2 = write("namespace", &writer, entry_2, sequencer_id_2, None).await;
+        let w2 = write("namespace", &writer, entry_2, kafka_partition_2, None).await;
         assert_stream_pending(&mut stream_1).await;
         assert_write_op_eq(&stream_2.next().await.unwrap().unwrap(), &w2);
 
-        let w3 = write("namespace", &writer, entry_3, sequencer_id_1, None).await;
+        let w3 = write("namespace", &writer, entry_3, kafka_partition_1, None).await;
         assert_stream_pending(&mut stream_2).await;
         assert_write_op_eq(&stream_1.next().await.unwrap().unwrap(), &w3);
 
@@ -569,21 +570,42 @@ pub mod test_utils {
         let reader_1 = context.reading(true).await.unwrap();
         let reader_2 = context.reading(true).await.unwrap();
 
-        let mut sequencer_ids_1 = writer_1.sequencer_ids();
-        let sequencer_ids_2 = writer_2.sequencer_ids();
-        assert_eq!(sequencer_ids_1, sequencer_ids_2);
-        assert_eq!(sequencer_ids_1.len(), 2);
-        let sequencer_id_1 = set_pop_first(&mut sequencer_ids_1).unwrap();
-        let sequencer_id_2 = set_pop_first(&mut sequencer_ids_1).unwrap();
+        let mut kafka_partitions_1 = writer_1.kafka_partitions();
+        let kafka_partitions_2 = writer_2.kafka_partitions();
+        assert_eq!(kafka_partitions_1, kafka_partitions_2);
+        assert_eq!(kafka_partitions_1.len(), 2);
+        let kafka_partition_1 = set_pop_first(&mut kafka_partitions_1).unwrap();
+        let kafka_partition_2 = set_pop_first(&mut kafka_partitions_1).unwrap();
 
-        let w_east_1 = write("namespace", &writer_1, entry_east_1, sequencer_id_1, None).await;
-        let w_west_1 = write("namespace", &writer_1, entry_west_1, sequencer_id_2, None).await;
-        let w_east_2 = write("namespace", &writer_2, entry_east_2, sequencer_id_1, None).await;
+        let w_east_1 = write(
+            "namespace",
+            &writer_1,
+            entry_east_1,
+            kafka_partition_1,
+            None,
+        )
+        .await;
+        let w_west_1 = write(
+            "namespace",
+            &writer_1,
+            entry_west_1,
+            kafka_partition_2,
+            None,
+        )
+        .await;
+        let w_east_2 = write(
+            "namespace",
+            &writer_2,
+            entry_east_2,
+            kafka_partition_1,
+            None,
+        )
+        .await;
 
-        let mut handler_1_1 = reader_1.stream_handler(sequencer_id_1).await.unwrap();
-        let mut handler_1_2 = reader_1.stream_handler(sequencer_id_2).await.unwrap();
-        let mut handler_2_1 = reader_2.stream_handler(sequencer_id_1).await.unwrap();
-        let mut handler_2_2 = reader_2.stream_handler(sequencer_id_2).await.unwrap();
+        let mut handler_1_1 = reader_1.stream_handler(kafka_partition_1).await.unwrap();
+        let mut handler_1_2 = reader_1.stream_handler(kafka_partition_2).await.unwrap();
+        let mut handler_2_1 = reader_2.stream_handler(kafka_partition_1).await.unwrap();
+        let mut handler_2_2 = reader_2.stream_handler(kafka_partition_2).await.unwrap();
 
         assert_reader_content(&mut handler_1_1, &[&w_east_1, &w_east_2]).await;
         assert_reader_content(&mut handler_1_2, &[&w_west_1]).await;
@@ -612,23 +634,23 @@ pub mod test_utils {
 
         let writer = context.writing(true).await.unwrap();
 
-        let mut sequencer_ids = writer.sequencer_ids();
-        let sequencer_id_1 = set_pop_first(&mut sequencer_ids).unwrap();
-        let sequencer_id_2 = set_pop_first(&mut sequencer_ids).unwrap();
+        let mut kafka_partitions = writer.kafka_partitions();
+        let kafka_partition_1 = set_pop_first(&mut kafka_partitions).unwrap();
+        let kafka_partition_2 = set_pop_first(&mut kafka_partitions).unwrap();
 
-        let w_east_1 = write("namespace", &writer, entry_east_1, sequencer_id_1, None).await;
-        let w_east_2 = write("namespace", &writer, entry_east_2, sequencer_id_1, None).await;
-        let w_west_1 = write("namespace", &writer, entry_west_1, sequencer_id_2, None).await;
+        let w_east_1 = write("namespace", &writer, entry_east_1, kafka_partition_1, None).await;
+        let w_east_2 = write("namespace", &writer, entry_east_2, kafka_partition_1, None).await;
+        let w_west_1 = write("namespace", &writer, entry_west_1, kafka_partition_2, None).await;
 
         let reader_1 = context.reading(true).await.unwrap();
         let reader_2 = context.reading(true).await.unwrap();
 
-        let mut handler_1_1_a = reader_1.stream_handler(sequencer_id_1).await.unwrap();
-        let mut handler_1_2_a = reader_1.stream_handler(sequencer_id_2).await.unwrap();
-        let mut handler_1_1_b = reader_1.stream_handler(sequencer_id_1).await.unwrap();
-        let mut handler_1_2_b = reader_1.stream_handler(sequencer_id_2).await.unwrap();
-        let mut handler_2_1 = reader_2.stream_handler(sequencer_id_1).await.unwrap();
-        let mut handler_2_2 = reader_2.stream_handler(sequencer_id_2).await.unwrap();
+        let mut handler_1_1_a = reader_1.stream_handler(kafka_partition_1).await.unwrap();
+        let mut handler_1_2_a = reader_1.stream_handler(kafka_partition_2).await.unwrap();
+        let mut handler_1_1_b = reader_1.stream_handler(kafka_partition_1).await.unwrap();
+        let mut handler_1_2_b = reader_1.stream_handler(kafka_partition_2).await.unwrap();
+        let mut handler_2_1 = reader_2.stream_handler(kafka_partition_1).await.unwrap();
+        let mut handler_2_2 = reader_2.stream_handler(kafka_partition_2).await.unwrap();
 
         // forward seek
         handler_1_1_a
@@ -650,11 +672,12 @@ pub mod test_utils {
         // seek to far end and then add data
         // The affected stream should error and then stop. The other streams should still be
         // pending.
+        let kp0 = KafkaPartition::new(0);
         handler_1_1_a
             .seek(SequenceNumber::new(1_000_000))
             .await
             .unwrap();
-        let w_east_3 = write("namespace", &writer, entry_east_3, 0, None).await;
+        let w_east_3 = write("namespace", &writer, entry_east_3, kp0, None).await;
 
         let err = handler_1_1_a
             .stream()
@@ -696,15 +719,15 @@ pub mod test_utils {
 
         let writer = context.writing(true).await.unwrap();
 
-        let mut sequencer_ids = writer.sequencer_ids();
-        let sequencer_id_1 = set_pop_first(&mut sequencer_ids).unwrap();
+        let mut kafka_partitions = writer.kafka_partitions();
+        let kafka_partition_1 = set_pop_first(&mut kafka_partitions).unwrap();
 
-        let w_east_1 = write("namespace", &writer, entry_east_1, sequencer_id_1, None).await;
-        let w_east_2 = write("namespace", &writer, entry_east_2, sequencer_id_1, None).await;
+        let w_east_1 = write("namespace", &writer, entry_east_1, kafka_partition_1, None).await;
+        let w_east_2 = write("namespace", &writer, entry_east_2, kafka_partition_1, None).await;
 
         let reader_1 = context.reading(true).await.unwrap();
 
-        let mut handler_1_1_a = reader_1.stream_handler(sequencer_id_1).await.unwrap();
+        let mut handler_1_1_a = reader_1.stream_handler(kafka_partition_1).await.unwrap();
 
         // forward seek
         handler_1_1_a
@@ -741,31 +764,43 @@ pub mod test_utils {
         let writer = context.writing(true).await.unwrap();
         let reader = context.reading(true).await.unwrap();
 
-        let mut sequencer_ids = writer.sequencer_ids();
-        let sequencer_id_1 = set_pop_first(&mut sequencer_ids).unwrap();
-        let sequencer_id_2 = set_pop_first(&mut sequencer_ids).unwrap();
+        let mut kafka_partitions = writer.kafka_partitions();
+        let kafka_partition_1 = set_pop_first(&mut kafka_partitions).unwrap();
+        let kafka_partition_2 = set_pop_first(&mut kafka_partitions).unwrap();
 
         // start at watermark 0
         assert_eq!(
-            reader.fetch_high_watermark(sequencer_id_1).await.unwrap(),
+            reader
+                .fetch_high_watermark(kafka_partition_1)
+                .await
+                .unwrap(),
             SequenceNumber::new(0),
         );
         assert_eq!(
-            reader.fetch_high_watermark(sequencer_id_2).await.unwrap(),
+            reader
+                .fetch_high_watermark(kafka_partition_2)
+                .await
+                .unwrap(),
             SequenceNumber::new(0)
         );
 
         // high water mark moves
-        write("namespace", &writer, entry_east_1, sequencer_id_1, None).await;
-        let w1 = write("namespace", &writer, entry_east_2, sequencer_id_1, None).await;
-        let w2 = write("namespace", &writer, entry_west_1, sequencer_id_2, None).await;
+        write("namespace", &writer, entry_east_1, kafka_partition_1, None).await;
+        let w1 = write("namespace", &writer, entry_east_2, kafka_partition_1, None).await;
+        let w2 = write("namespace", &writer, entry_west_1, kafka_partition_2, None).await;
         assert_eq!(
-            reader.fetch_high_watermark(sequencer_id_1).await.unwrap(),
+            reader
+                .fetch_high_watermark(kafka_partition_1)
+                .await
+                .unwrap(),
             w1.meta().sequence().unwrap().sequence_number + 1
         );
 
         assert_eq!(
-            reader.fetch_high_watermark(sequencer_id_2).await.unwrap(),
+            reader
+                .fetch_high_watermark(kafka_partition_2)
+                .await
+                .unwrap(),
             w2.meta().sequence().unwrap().sequence_number + 1
         );
     }
@@ -790,18 +825,18 @@ pub mod test_utils {
         let writer = context.writing(true).await.unwrap();
         let reader = context.reading(true).await.unwrap();
 
-        let mut sequencer_ids = writer.sequencer_ids();
-        assert_eq!(sequencer_ids.len(), 1);
-        let sequencer_id = set_pop_first(&mut sequencer_ids).unwrap();
+        let mut kafka_partitions = writer.kafka_partitions();
+        assert_eq!(kafka_partitions.len(), 1);
+        let kafka_partition = set_pop_first(&mut kafka_partitions).unwrap();
 
-        let write = write("namespace", &writer, entry, sequencer_id, None).await;
+        let write = write("namespace", &writer, entry, kafka_partition, None).await;
         let reported_ts = write.meta().producer_ts().unwrap();
 
         // advance time
         time.inc(Duration::from_secs(10));
 
         // check that the timestamp records the ingestion time, not the read time
-        let mut handler = reader.stream_handler(sequencer_id).await.unwrap();
+        let mut handler = reader.stream_handler(kafka_partition).await.unwrap();
         let sequenced_entry = handler.stream().await.next().await.unwrap().unwrap();
         let ts_entry = sequenced_entry.meta().producer_ts().unwrap();
         assert_eq!(ts_entry, t0);
@@ -841,7 +876,7 @@ pub mod test_utils {
     /// This tests that:
     ///
     /// - all sequencers are reported
-    async fn test_sequencer_ids<T>(adapter: &T)
+    async fn test_kafka_partitions<T>(adapter: &T)
     where
         T: TestAdapter,
     {
@@ -855,14 +890,14 @@ pub mod test_utils {
         let reader_1 = context.reading(true).await.unwrap();
         let reader_2 = context.reading(true).await.unwrap();
 
-        let sequencer_ids_1 = writer_1.sequencer_ids();
-        let sequencer_ids_2 = writer_2.sequencer_ids();
-        let sequencer_ids_3 = reader_1.sequencer_ids();
-        let sequencer_ids_4 = reader_2.sequencer_ids();
-        assert_eq!(sequencer_ids_1.len(), n_sequencers as usize);
-        assert_eq!(sequencer_ids_1, sequencer_ids_2);
-        assert_eq!(sequencer_ids_1, sequencer_ids_3);
-        assert_eq!(sequencer_ids_1, sequencer_ids_4);
+        let kafka_partitions_1 = writer_1.kafka_partitions();
+        let kafka_partitions_2 = writer_2.kafka_partitions();
+        let kafka_partitions_3 = reader_1.kafka_partitions();
+        let kafka_partitions_4 = reader_2.kafka_partitions();
+        assert_eq!(kafka_partitions_1.len(), n_sequencers as usize);
+        assert_eq!(kafka_partitions_1, kafka_partitions_2);
+        assert_eq!(kafka_partitions_1, kafka_partitions_3);
+        assert_eq!(kafka_partitions_1, kafka_partitions_4);
     }
 
     /// Test that span contexts are propagated through the system.
@@ -877,14 +912,14 @@ pub mod test_utils {
         let writer = context.writing(true).await.unwrap();
         let reader = context.reading(true).await.unwrap();
 
-        let mut sequencer_ids = writer.sequencer_ids();
-        assert_eq!(sequencer_ids.len(), 1);
-        let sequencer_id = set_pop_first(&mut sequencer_ids).unwrap();
-        let mut handler = reader.stream_handler(sequencer_id).await.unwrap();
+        let mut kafka_partitions = writer.kafka_partitions();
+        assert_eq!(kafka_partitions.len(), 1);
+        let kafka_partition = set_pop_first(&mut kafka_partitions).unwrap();
+        let mut handler = reader.stream_handler(kafka_partition).await.unwrap();
         let mut stream = handler.stream().await;
 
         // 1: no context
-        write("namespace", &writer, entry, sequencer_id, None).await;
+        write("namespace", &writer, entry, kafka_partition, None).await;
 
         // check write 1
         let write_1 = stream.next().await.unwrap().unwrap();
@@ -900,7 +935,7 @@ pub mod test_utils {
             "namespace",
             &writer,
             entry,
-            sequencer_id,
+            kafka_partition,
             Some(&span_context_1),
         )
         .await;
@@ -912,7 +947,7 @@ pub mod test_utils {
             "namespace",
             &writer,
             entry,
-            sequencer_id,
+            kafka_partition,
             Some(&span_context_2),
         )
         .await;
@@ -945,9 +980,10 @@ pub mod test_utils {
         let writer = context.writing(true).await.unwrap();
 
         // flip bits to get an unknown sequencer
-        let sequencer_id = !set_pop_first(&mut writer.sequencer_ids()).unwrap();
+        let kafka_partition =
+            KafkaPartition::new(!set_pop_first(&mut writer.kafka_partitions()).unwrap().get());
         writer
-            .store_operation(sequencer_id, &operation)
+            .store_operation(kafka_partition, &operation)
             .await
             .unwrap_err();
     }
@@ -970,14 +1006,14 @@ pub mod test_utils {
         let writer = context.writing(true).await.unwrap();
         let reader = context.reading(true).await.unwrap();
 
-        let mut sequencer_ids = writer.sequencer_ids();
-        assert_eq!(sequencer_ids.len(), 1);
-        let sequencer_id = set_pop_first(&mut sequencer_ids).unwrap();
+        let mut kafka_partitions = writer.kafka_partitions();
+        assert_eq!(kafka_partitions.len(), 1);
+        let kafka_partition = set_pop_first(&mut kafka_partitions).unwrap();
 
-        let w1 = write("namespace_1", &writer, entry_2, sequencer_id, None).await;
-        let w2 = write("namespace_2", &writer, entry_1, sequencer_id, None).await;
+        let w1 = write("namespace_1", &writer, entry_2, kafka_partition, None).await;
+        let w2 = write("namespace_2", &writer, entry_1, kafka_partition, None).await;
 
-        let mut handler = reader.stream_handler(sequencer_id).await.unwrap();
+        let mut handler = reader.stream_handler(kafka_partition).await.unwrap();
         assert_reader_content(&mut handler, &[&w1, &w2]).await;
     }
 
@@ -990,9 +1026,9 @@ pub mod test_utils {
 
         let writer = Arc::new(context.writing(true).await.unwrap());
 
-        let mut sequencer_ids = writer.sequencer_ids();
-        assert_eq!(sequencer_ids.len(), 1);
-        let sequencer_id = set_pop_first(&mut sequencer_ids).unwrap();
+        let mut kafka_partitions = writer.kafka_partitions();
+        assert_eq!(kafka_partitions.len(), 1);
+        let kafka_partition = set_pop_first(&mut kafka_partitions).unwrap();
 
         let mut write_tasks: FuturesUnordered<_> = (0..20)
             .map(|i| {
@@ -1001,7 +1037,7 @@ pub mod test_utils {
                 async move {
                     let entry = format!("upc,region=east user={} {}", i, i);
 
-                    write("ns", writer.as_ref(), &entry, sequencer_id, None).await;
+                    write("ns", writer.as_ref(), &entry, kafka_partition, None).await;
                 }
             })
             .collect();

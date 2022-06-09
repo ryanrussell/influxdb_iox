@@ -1,5 +1,5 @@
 use crate::codec::{ContentType, IoxHeaders};
-use data_types::{Sequence, SequenceNumber};
+use data_types::{KafkaPartition, Sequence, SequenceNumber};
 use dml::{DmlMeta, DmlOperation, DmlWrite};
 use hashbrown::{hash_map::Entry, HashMap};
 use iox_time::{Time, TimeProvider};
@@ -243,8 +243,8 @@ pub struct DmlAggregator {
     /// Maximum batch size in bytes.
     max_size: usize,
 
-    /// Sequencer ID.
-    sequencer_id: u32,
+    /// kafka partition.
+    kafka_partition: KafkaPartition,
 
     /// Inner state that will be modified via `try_push` and reset via `flush`.
     state: DmlAggregatorState,
@@ -258,14 +258,14 @@ impl DmlAggregator {
         collector: Option<Arc<dyn TraceCollector>>,
         database_name: impl Into<Arc<str>>,
         max_size: usize,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         time_provider: Arc<dyn TimeProvider>,
     ) -> Self {
         Self {
             collector,
             database_name: database_name.into(),
             max_size,
-            sequencer_id,
+            kafka_partition,
             state: DmlAggregatorState::default(),
             time_provider,
         }
@@ -402,7 +402,7 @@ impl Aggregator for DmlAggregator {
 
         debug!(
             db_name = %self.database_name,
-            sequencer_id = self.sequencer_id,
+            kafka_partition = self.kafka_partition.get(),
             records = state.tag_to_record.len(),
             already_flushed = completed_ops,
             size = state.size(),
@@ -415,7 +415,7 @@ impl Aggregator for DmlAggregator {
         Ok((
             records,
             Deaggregator {
-                sequencer_id: self.sequencer_id,
+                kafka_partition: self.kafka_partition,
                 database_name: Arc::clone(&self.database_name),
                 metadata,
                 tag_to_record: state.tag_to_record,
@@ -480,8 +480,8 @@ struct Metadata {
 
 #[derive(Debug)]
 pub struct Deaggregator {
-    /// Sequencer ID.
-    sequencer_id: u32,
+    /// Kafka Partition.
+    kafka_partition: KafkaPartition,
 
     /// Database name
     database_name: Arc<str>,
@@ -521,7 +521,7 @@ impl StatusDeaggregator for Deaggregator {
         let md = &self.metadata[record];
 
         Ok(DmlMeta::sequenced(
-            Sequence::new(self.sequencer_id, SequenceNumber::new(offset)),
+            Sequence::new(self.kafka_partition, SequenceNumber::new(offset)),
             md.timestamp,
             md.span_ctx.clone(),
             md.kafka_write_size,

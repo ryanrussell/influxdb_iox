@@ -88,9 +88,8 @@ impl Drop for PeriodicWatermarkFetcher {
 struct Poller {
     write_buffer: Arc<dyn WriteBufferReading>,
 
-    // The sequencer / kafka partition to ask the write buffer the max offset
-    // for.
-    sequencer_id: u32,
+    // The kafka partition to ask the write buffer the max offset for.
+    kafka_partition: KafkaPartition,
 
     // A metric tracking the number of max offset fetch errors.
     error_count: U64Counter,
@@ -104,11 +103,11 @@ impl Poller {
     /// Initialise a new poller.
     ///
     /// The returned atomic will be updated with the most recent observed
-    /// watermark value for `sequencer_id` after a successful poll, or 0 if
+    /// watermark value for `kafka_partition` after a successful poll, or 0 if
     /// never successfully polled.
     fn new(
         write_buffer: Arc<dyn WriteBufferReading>,
-        partition: KafkaPartition,
+        kafka_partition: KafkaPartition,
         metrics: &metric::Registry,
     ) -> (Self, Arc<AtomicI64>) {
         let last_watermark = Arc::new(AtomicI64::new(0));
@@ -123,10 +122,7 @@ impl Poller {
 
         (
             Self {
-                sequencer_id: partition
-                    .get()
-                    .try_into()
-                    .expect("sequence ID out of range"),
+                kafka_partition,
                 write_buffer,
                 error_count,
                 last_watermark,
@@ -148,7 +144,7 @@ impl Poller {
 
             let maybe_offset = self
                 .write_buffer
-                .fetch_high_watermark(self.sequencer_id)
+                .fetch_high_watermark(self.kafka_partition)
                 .await;
 
             let now = Instant::now();
@@ -221,7 +217,10 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_ok() {
         let state = MockBufferSharedState::empty_with_n_sequencers(1.try_into().unwrap());
-        state.push_lp(Sequence::new(0, SequenceNumber::new(41)), "cpu,t=1 v=2");
+        state.push_lp(
+            Sequence::new(KafkaPartition::new(0), SequenceNumber::new(41)),
+            "cpu,t=1 v=2",
+        );
 
         let write_buffer = Arc::new(
             MockBufferForReading::new(state, None).expect("failed to init mock write buffer"),

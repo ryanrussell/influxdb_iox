@@ -11,7 +11,7 @@ use crate::{
     },
 };
 use async_trait::async_trait;
-use data_types::{Sequence, SequenceNumber};
+use data_types::{KafkaPartition, Sequence, SequenceNumber};
 use dml::{DmlMeta, DmlOperation};
 use futures::{stream::BoxStream, StreamExt};
 use iox_time::{Time, TimeProvider};
@@ -39,7 +39,7 @@ type Result<T, E = WriteBufferError> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 pub struct RSKafkaProducer {
-    producers: BTreeMap<u32, BatchProducer<DmlAggregator>>,
+    producers: BTreeMap<KafkaPartition, BatchProducer<DmlAggregator>>,
 }
 
 impl RSKafkaProducer {
@@ -63,7 +63,7 @@ impl RSKafkaProducer {
 
         let producers = partition_clients
             .into_iter()
-            .map(|(sequencer_id, partition_client)| {
+            .map(|(kafka_partition, partition_client)| {
                 let mut producer_builder = BatchProducerBuilder::new(Arc::new(partition_client));
                 if let Some(linger) = producer_config.linger {
                     producer_builder = producer_builder.with_linger(linger);
@@ -72,11 +72,11 @@ impl RSKafkaProducer {
                     trace_collector.clone(),
                     database_name.clone(),
                     producer_config.max_batch_size,
-                    sequencer_id,
+                    kafka_partition,
                     Arc::clone(&time_provider),
                 ));
 
-                (sequencer_id, producer)
+                (kafka_partition, producer)
             })
             .collect();
 
@@ -86,20 +86,20 @@ impl RSKafkaProducer {
 
 #[async_trait]
 impl WriteBufferWriting for RSKafkaProducer {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
         self.producers.keys().copied().collect()
     }
 
     async fn store_operation(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
         operation: &DmlOperation,
     ) -> Result<DmlMeta, WriteBufferError> {
         let producer = self
             .producers
-            .get(&sequencer_id)
+            .get(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown partition: {}", sequencer_id).into()
+                format!("Unknown partition: {}", kafka_partition).into()
             })?;
 
         // TODO: don't clone!
@@ -125,7 +125,7 @@ pub struct RSKafkaStreamHandler {
     terminated: Arc<AtomicBool>,
     trace_collector: Option<Arc<dyn TraceCollector>>,
     consumer_config: ConsumerConfig,
-    sequencer_id: u32,
+    kafka_partition: KafkaPartition,
 }
 
 #[async_trait]
@@ -161,7 +161,7 @@ impl WriteBufferStreamHandler for RSKafkaStreamHandler {
         }
         let stream = stream_builder.build();
 
-        let sequencer_id = self.sequencer_id;
+        let kafka_partition = self.kafka_partition;
 
         let stream = stream.map(move |res| {
             let (record, _watermark) = match res {
@@ -187,7 +187,7 @@ impl WriteBufferStreamHandler for RSKafkaStreamHandler {
                 IoxHeaders::from_headers(record.record.headers, trace_collector.as_ref())?;
 
             let sequence = Sequence {
-                sequencer_id,
+                kafka_partition,
                 sequence_number: SequenceNumber::new(record.offset),
             };
 
@@ -228,7 +228,7 @@ impl WriteBufferStreamHandler for RSKafkaStreamHandler {
 
 #[derive(Debug)]
 pub struct RSKafkaConsumer {
-    partition_clients: BTreeMap<u32, Arc<PartitionClient>>,
+    partition_clients: BTreeMap<KafkaPartition, Arc<PartitionClient>>,
     trace_collector: Option<Arc<dyn TraceCollector>>,
     consumer_config: ConsumerConfig,
 }
@@ -264,19 +264,19 @@ impl RSKafkaConsumer {
 
 #[async_trait]
 impl WriteBufferReading for RSKafkaConsumer {
-    fn sequencer_ids(&self) -> BTreeSet<u32> {
+    fn kafka_partitions(&self) -> BTreeSet<KafkaPartition> {
         self.partition_clients.keys().copied().collect()
     }
 
     async fn stream_handler(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<Box<dyn WriteBufferStreamHandler>, WriteBufferError> {
         let partition_client = self
             .partition_clients
-            .get(&sequencer_id)
+            .get(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown partition: {}", sequencer_id).into()
+                format!("Unknown partition: {}", kafka_partition).into()
             })?;
 
         Ok(Box::new(RSKafkaStreamHandler {
@@ -285,19 +285,19 @@ impl WriteBufferReading for RSKafkaConsumer {
             terminated: Arc::new(AtomicBool::new(false)),
             trace_collector: self.trace_collector.clone(),
             consumer_config: self.consumer_config.clone(),
-            sequencer_id,
+            kafka_partition,
         }))
     }
 
     async fn fetch_high_watermark(
         &self,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> Result<SequenceNumber, WriteBufferError> {
         let partition_client = self
             .partition_clients
-            .get(&sequencer_id)
+            .get(&kafka_partition)
             .ok_or_else::<WriteBufferError, _>(|| {
-                format!("Unknown partition: {}", sequencer_id).into()
+                format!("Unknown partition: {}", kafka_partition).into()
             })?;
 
         let watermark = partition_client.get_offset(OffsetAt::Latest).await?;
@@ -314,7 +314,7 @@ async fn setup_topic(
     database_name: String,
     connection_config: &BTreeMap<String, String>,
     creation_config: Option<&WriteBufferCreationConfig>,
-) -> Result<BTreeMap<u32, PartitionClient>> {
+) -> Result<BTreeMap<KafkaPartition, PartitionClient>> {
     let client_config = ClientConfig::try_from(connection_config)?;
     let mut client_builder = ClientBuilder::new(vec![conn]);
     if let Some(max_message_size) = client_config.max_message_size {
@@ -333,7 +333,7 @@ async fn setup_topic(
             let mut partition_clients = BTreeMap::new();
             for partition in topic.partitions {
                 let c = client.partition_client(&database_name, partition)?;
-                let partition = u32::try_from(partition).map_err(WriteBufferError::invalid_data)?;
+                let partition = KafkaPartition::new(partition);
                 partition_clients.insert(partition, c);
             }
             return Ok(partition_clients);
@@ -511,12 +511,12 @@ mod tests {
         let producer = ctx.writing(true).await.unwrap();
 
         // write broken message followed by a real one
-        let sequencer_id = set_pop_first(&mut producer.sequencer_ids()).unwrap();
+        let kafka_partition = set_pop_first(&mut producer.kafka_partitions()).unwrap();
         ClientBuilder::new(vec![conn])
             .build()
             .await
             .unwrap()
-            .partition_client(ctx.database_name.clone(), sequencer_id as i32)
+            .partition_client(ctx.database_name.clone(), kafka_partition.get())
             .unwrap()
             .produce(
                 vec![Record {
@@ -533,13 +533,13 @@ mod tests {
             "namespace",
             &producer,
             "table foo=1 1",
-            sequencer_id,
+            kafka_partition,
             None,
         )
         .await;
 
         let consumer = ctx.reading(true).await.unwrap();
-        let mut handler = consumer.stream_handler(sequencer_id).await.unwrap();
+        let mut handler = consumer.stream_handler(kafka_partition).await.unwrap();
 
         // read broken message from stream
         let mut stream = handler.stream().await;
@@ -562,23 +562,23 @@ mod tests {
 
         let producer = ctx.writing(true).await.unwrap();
 
-        let sequencer_id = set_pop_first(&mut producer.sequencer_ids()).unwrap();
+        let kafka_partition = set_pop_first(&mut producer.kafka_partitions()).unwrap();
 
         let (w1_1, w1_2, w2_1, d1_1, d1_2, w1_3, w1_4, w2_2) = tokio::join!(
             // ns1: batch 1
-            write("ns1", &producer, &trace_collector, sequencer_id),
-            write("ns1", &producer, &trace_collector, sequencer_id),
+            write("ns1", &producer, &trace_collector, kafka_partition),
+            write("ns1", &producer, &trace_collector, kafka_partition),
             // ns2: batch 1, part A
-            write("ns2", &producer, &trace_collector, sequencer_id),
+            write("ns2", &producer, &trace_collector, kafka_partition),
             // ns1: batch 2
-            delete("ns1", &producer, &trace_collector, sequencer_id),
+            delete("ns1", &producer, &trace_collector, kafka_partition),
             // ns1: batch 3
-            delete("ns1", &producer, &trace_collector, sequencer_id),
+            delete("ns1", &producer, &trace_collector, kafka_partition),
             // ns1: batch 4
-            write("ns1", &producer, &trace_collector, sequencer_id),
-            write("ns1", &producer, &trace_collector, sequencer_id),
+            write("ns1", &producer, &trace_collector, kafka_partition),
+            write("ns1", &producer, &trace_collector, kafka_partition),
             // ns2: batch 1, part B
-            write("ns2", &producer, &trace_collector, sequencer_id),
+            write("ns2", &producer, &trace_collector, kafka_partition),
         );
 
         // ensure that write operations were fused
@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(w2_1.sequence().unwrap(), w2_2.sequence().unwrap());
 
         let consumer = ctx.reading(true).await.unwrap();
-        let mut handler = consumer.stream_handler(sequencer_id).await.unwrap();
+        let mut handler = consumer.stream_handler(kafka_partition).await.unwrap();
         let mut stream = handler.stream().await;
 
         // get output, note that the write operations were fused
@@ -678,20 +678,23 @@ mod tests {
         namespace: &str,
         producer: &RSKafkaProducer,
         trace_collector: &Arc<RingBufferTraceCollector>,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> DmlMeta {
         let span_ctx = SpanContext::new(Arc::clone(trace_collector) as Arc<_>);
         let tables = mutable_batch_lp::lines_to_batches("table foo=1", 0).unwrap();
         let write = DmlWrite::new(namespace, tables, DmlMeta::unsequenced(Some(span_ctx)));
         let op = DmlOperation::Write(write);
-        producer.store_operation(sequencer_id, &op).await.unwrap()
+        producer
+            .store_operation(kafka_partition, &op)
+            .await
+            .unwrap()
     }
 
     async fn delete(
         namespace: &str,
         producer: &RSKafkaProducer,
         trace_collector: &Arc<RingBufferTraceCollector>,
-        sequencer_id: u32,
+        kafka_partition: KafkaPartition,
     ) -> DmlMeta {
         let span_ctx = SpanContext::new(Arc::clone(trace_collector) as Arc<_>);
         let op = DmlOperation::Delete(DmlDelete::new(
@@ -703,6 +706,9 @@ mod tests {
             None,
             DmlMeta::unsequenced(Some(span_ctx)),
         ));
-        producer.store_operation(sequencer_id, &op).await.unwrap()
+        producer
+            .store_operation(kafka_partition, &op)
+            .await
+            .unwrap()
     }
 }

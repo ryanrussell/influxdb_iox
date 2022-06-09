@@ -1,5 +1,5 @@
 use assert_matches::assert_matches;
-use data_types::{KafkaTopicId, PartitionTemplate, QueryPoolId, TemplatePart};
+use data_types::{KafkaPartition, KafkaTopicId, PartitionTemplate, QueryPoolId, TemplatePart};
 use dml::DmlOperation;
 use hashbrown::HashMap;
 use hyper::{Body, Request, StatusCode};
@@ -81,7 +81,7 @@ impl TestContext {
         let write_buffer_state = write_buffer.state();
         let write_buffer: Arc<dyn WriteBufferWriting> = Arc::new(write_buffer);
 
-        let shards: BTreeSet<_> = write_buffer.sequencer_ids();
+        let shards: BTreeSet<_> = write_buffer.kafka_partitions();
         let sharded_write_buffer = ShardedWriteBuffer::new(
             shards
                 .into_iter()
@@ -173,7 +173,9 @@ async fn test_write_ok() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     // Check the write buffer observed the correct write.
-    let writes = ctx.write_buffer_state().get_messages(0);
+    let writes = ctx
+        .write_buffer_state()
+        .get_messages(KafkaPartition::new(0));
     assert_eq!(writes.len(), 1);
     assert_matches!(writes.as_slice(), [Ok(DmlOperation::Write(w))] => {
         assert_eq!(w.namespace(), "bananas_test");

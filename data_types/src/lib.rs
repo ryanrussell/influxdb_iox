@@ -155,7 +155,7 @@ pub struct KafkaPartition(i32);
 
 #[allow(missing_docs)]
 impl KafkaPartition {
-    pub fn new(v: i32) -> Self {
+    pub const fn new(v: i32) -> Self {
         Self(v)
     }
     pub fn get(&self) -> i32 {
@@ -1963,17 +1963,17 @@ impl TableSummary {
 /// Kafka partition ID plus offset
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Sequence {
-    /// The sequencer id (kafka partition id)
-    pub sequencer_id: u32,
+    /// The kafka partition
+    pub kafka_partition: KafkaPartition,
     /// The sequence number (kafka offset)
     pub sequence_number: SequenceNumber,
 }
 
 impl Sequence {
     /// Create a new Sequence
-    pub fn new(sequencer_id: u32, sequence_number: SequenceNumber) -> Self {
+    pub fn new(kafka_partition: KafkaPartition, sequence_number: SequenceNumber) -> Self {
         Self {
-            sequencer_id,
+            kafka_partition,
             sequence_number,
         }
     }
