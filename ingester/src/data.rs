@@ -16,7 +16,7 @@ use data_types::{
 use datafusion::physical_plan::SendableRecordBatchStream;
 use dml::DmlOperation;
 use iox_catalog::interface::Catalog;
-use iox_query::exec::Executor;
+use iox_query::{exec::Executor, QueryChunk};
 use iox_time::SystemProvider;
 use metric::U64Counter;
 use mutable_batch::MutableBatch;
@@ -25,7 +25,7 @@ use observability_deps::tracing::{debug, warn};
 use parking_lot::RwLock;
 use parquet_file::storage::ParquetStorage;
 use predicate::Predicate;
-use schema::{selection::Selection, Schema};
+use schema::{merge::merge_record_batch_schemas2, selection::Selection, Schema};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -1033,6 +1033,30 @@ pub(crate) struct UnpersistedPartitionData {
     pub partition_status: PartitionStatus,
 }
 
+impl UnpersistedPartitionData {
+    /// Return all snapshot batches in this partition data as chunks
+    pub(crate) fn snapshots(&self) -> Vec<Arc<SnapshotBatch>> {
+        self.non_persisted
+            .iter()
+            .chain(
+                self.persisting
+                    .map(|persisting| persisting.data.iter())
+                    .into_iter()
+                    .flatten(),
+            )
+            .cloned()
+            .collect()
+    }
+
+    /// Return all snapshot batches in this partition data as chunks
+    pub(crate) fn chunks(&self) -> Vec<Arc<dyn QueryChunk>> {
+        self.snapshots()
+            .into_iter()
+            .map(|c| c as _) // tell compiler Snapshot is QueryChunk
+            .collect()
+    }
+}
+
 /// Data of an IOx Partition of a given Table of a Namesapce that belongs to a given Shard
 #[derive(Debug)]
 pub(crate) struct PartitionData {
@@ -1133,10 +1157,18 @@ impl PartitionData {
         let (min_sequencer_number, _) = query_batch.min_max_sequence_numbers();
         assert!(min_sequencer_number <= max_sequencer_number);
 
+        let batches = query_batch
+            .data
+            .iter()
+            .map(|snapshot| snapshot.data.as_ref());
+        let merged_schema = merge_record_batch_schemas2(batches);
+
         // Run query on the QueryableBatch to apply the tombstone.
         let stream = match query(
+            table_name,
+            merged_schema,
             executor,
-            Arc::new(query_batch),
+            vec![Arc::new(query_batch) as _],
             Predicate::default(),
             Selection::All,
         )

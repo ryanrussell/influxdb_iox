@@ -1,6 +1,6 @@
 //! Handle all requests from Querier
 
-use crate::data::{IngesterData, IngesterQueryResponse, QueryableBatch, UnpersistedPartitionData};
+use crate::data::{IngesterData, IngesterQueryResponse, UnpersistedPartitionData};
 use arrow::{error::ArrowError, record_batch::RecordBatch};
 use arrow_util::util::merge_record_batches;
 use datafusion::{
@@ -15,11 +15,15 @@ use datafusion::{
 use generated_types::ingester::IngesterQueryRequest;
 use iox_query::{
     exec::{Executor, ExecutorType},
-    QueryChunk, QueryChunkMeta, ScanPlanBuilder,
+    QueryChunk, ScanPlanBuilder,
 };
 use observability_deps::tracing::debug;
 use predicate::Predicate;
-use schema::{merge::merge_record_batch_schemas, selection::Selection};
+use schema::{
+    merge::{merge_record_batch_schemas, merge_record_batch_schemas2},
+    selection::Selection,
+    Schema,
+};
 use snafu::{ensure, ResultExt, Snafu};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -126,11 +130,17 @@ pub async fn prepare_data_to_querier(
             unpersisted_partitions
                 .insert(partition.partition_id, partition.partition_status.clone());
 
+            let merged_schema = compute_merged_schema(&partition);
+
             // extract payload
             let partition_id = partition.partition_id;
-            let maybe_batch =
-                prepare_data_to_querier_for_partition(ingest_data.exec(), partition, request)
-                    .await?;
+            let maybe_batch = prepare_data_to_querier_for_partition(
+                merged_schema,
+                ingest_data.exec(),
+                partition,
+                request,
+            )
+            .await?;
             if let Some(batch) = maybe_batch {
                 batches.push(Arc::new(batch));
                 batch_partition_ids.push(partition_id);
@@ -185,7 +195,17 @@ pub async fn prepare_data_to_querier(
     ))
 }
 
+fn compute_merged_schema(unpersisted_partition_data: &UnpersistedPartitionData) -> Arc<Schema> {
+    let batches = unpersisted_partition_data
+        .snapshots()
+        .into_iter()
+        .map(|snapshot| snapshot.data.as_ref());
+
+    merge_record_batch_schemas2(batches)
+}
+
 async fn prepare_data_to_querier_for_partition(
+    merged_schema: Arc<Schema>,
     executor: &Executor,
     unpersisted_partition_data: UnpersistedPartitionData,
     request: &IngesterQueryRequest,
@@ -202,66 +222,19 @@ async fn prepare_data_to_querier_for_partition(
     };
     let predicate = request.predicate.clone().unwrap_or_default();
 
-    let mut filter_applied_batches = vec![];
-    if let Some(queryable_batch) = unpersisted_partition_data.persisting {
-        // ------------------------------------------------
-        // persisting data
+    //let mut filter_applied_batches = vec![];
 
-        let record_batch = run_query(
-            executor,
-            Arc::new(queryable_batch),
-            predicate.clone(),
-            selection,
-        )
-        .await?;
+    let chunks = unpersisted_partition_data.chunks();
 
-        if let Some(record_batch) = record_batch {
-            if record_batch.num_rows() > 0 {
-                filter_applied_batches.push(Arc::new(record_batch));
-            }
-        }
-    }
-
-    // ------------------------------------------------
-    // Apply filters on the snapshot batches
-    if !unpersisted_partition_data.non_persisted.is_empty() {
-        // Make a Query able batch for all the snapshot
-        let queryable_batch = QueryableBatch::new(
-            &request.table,
-            unpersisted_partition_data.non_persisted,
-            vec![],
-        );
-
-        let record_batch =
-            run_query(executor, Arc::new(queryable_batch), predicate, selection).await?;
-
-        if let Some(record_batch) = record_batch {
-            if record_batch.num_rows() > 0 {
-                filter_applied_batches.push(Arc::new(record_batch));
-            }
-        }
-    }
-
-    // ------------------------------------------------
-    // Combine record batches into one batch and pad null values as needed
-
-    // Schema of all record batches after merging
-    let schema = merge_record_batch_schemas(&filter_applied_batches);
-    let batch = merge_record_batches(schema.as_arrow(), filter_applied_batches)
-        .context(ConcatBatchesSnafu)?;
-
-    Ok(batch)
-}
-
-/// Query a given Queryable Batch, applying selection and filters as appropriate
-/// Return one record batch
-async fn run_query(
-    executor: &Executor,
-    data: Arc<QueryableBatch>,
-    predicate: Predicate,
-    selection: Selection<'_>,
-) -> Result<Option<RecordBatch>> {
-    let stream = query(executor, data, predicate, selection).await?;
+    let stream = query(
+        &request.table,
+        merged_schema,
+        executor,
+        chunks,
+        predicate,
+        selection,
+    )
+    .await?;
 
     let record_batches = datafusion::physical_plan::common::collect(stream)
         .await
@@ -275,24 +248,55 @@ async fn run_query(
     let record_batch = RecordBatch::concat(&record_batches[0].schema(), &record_batches)
         .context(ConcatBatchesSnafu)?;
 
-    Ok(Some(record_batch))
+    if record_batch.num_rows() > 0 {
+        Ok(Some(record_batch))
+    } else {
+        Ok(None)
+    }
+
+    // // ------------------------------------------------
+    // // Apply filters on the snapshot batches
+    // if !unpersisted_partition_data.non_persisted.is_empty() {
+    //     // Make a Query able batch for all the snapshot
+    //     let queryable_batch = QueryableBatch::new(
+    //         &request.table,
+    //         unpersisted_partition_data.non_persisted,
+    //         vec![],
+    //     );
+
+    //     let record_batch =
+    //         run_query(executor, Arc::new(queryable_batch), predicate, selection).await?;
+
+    //     if let Some(record_batch) = record_batch {
+    //         if record_batch.num_rows() > 0 {
+    //             filter_applied_batches.push(Arc::new(record_batch));
+    //         }
+    //     }
+    // }
+
+    // ------------------------------------------------
+    // Combine record batches into one batch and pad null values as needed
+
+    // // Schema of all record batches after merging
+    // let schema = merge_record_batch_schemas(&filter_applied_batches);
+    // let batch = merge_record_batches(schema.as_arrow(), filter_applied_batches)
+    //     .context(ConcatBatchesSnafu)?;
+
+    // Ok(Some(record_batch))
 }
 
 /// Query a given Queryable Batch, applying selection and filters as appropriate
 /// Return stream of record batches
 pub(crate) async fn query(
+    table_name: &str,
+    merged_schema: Arc<Schema>,
     executor: &Executor,
-    data: Arc<QueryableBatch>,
+    data: Vec<Arc<dyn QueryChunk>>,
     predicate: Predicate,
     selection: Selection<'_>,
 ) -> Result<SendableRecordBatchStream> {
     // Build logical plan for filtering data
     // Note that this query will also apply the delete predicates that go with the QueryableBatch
-
-    let mut expr = vec![];
-    if let Some(filter_expr) = predicate.filter_expr() {
-        expr.push(filter_expr);
-    }
 
     // TODO: Since we have different type of servers (router,
     // ingester, compactor, and querier), we may want to add more
@@ -301,15 +305,10 @@ pub(crate) async fn query(
     let ctx = executor.new_context(ExecutorType::Query);
 
     // Creates an execution plan for a scan and filter data of a single chunk
-    let schema = data.schema();
-    let table_name = data.table_name().to_string();
-
-    debug!(%table_name, ?predicate, "Creating single chunk scan plan");
-
-    let logical_plan = ScanPlanBuilder::new(schema)
+    let logical_plan = ScanPlanBuilder::new(merged_schema)
         .with_session_context(ctx.child_ctx("scan_and_filter planning"))
         .with_predicate(&predicate)
-        .with_chunks([data as _])
+        .with_chunks(data)
         .build()
         .context(FrontendSnafu)?
         .plan_builder
@@ -319,7 +318,7 @@ pub(crate) async fn query(
     debug!(%table_name, plan=%logical_plan.display_indent_schema(),
            "created single chunk scan plan");
 
-    // Now, restrict to all columns that are relevant
+    // Now, restrict to only columns that are relevant
     let logical_plan = match selection {
         Selection::All => logical_plan,
         Selection::Some(cols) => {
