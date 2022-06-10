@@ -51,14 +51,7 @@ cargo run --release -- run router --server-id 1
 cargo run --release -- run database --server-id 2 --api-bind 127.0.0.1:8084 --grpc-bind 127.0.0.1:8086
 ```
 
-You'll also need to run a Kafka instance. There's a Docker compose script in the influxdb_iox
-repo you can run with:
-
-```
-docker-compose -f docker/ci-kafka-docker-compose.yml up kafka
-```
-
-The Kafka instance will be accessible from `127.0.0.1:9093` if you run it with this script.
+You'll also need to run a Kafka instance separately.
 
 Once you have the two IOx servers and one Kafka instance running, create a database with a name in
 the format `[orgname]_[bucketname]`. For example, create a database in IOx named `mlb_pirates`, and
