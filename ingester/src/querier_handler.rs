@@ -20,7 +20,7 @@ use iox_query::{
 use observability_deps::tracing::debug;
 use predicate::Predicate;
 use schema::{
-    merge::{merge_record_batch_schemas, merge_record_batch_schemas2},
+    merge::{merge_record_batch_schemas, SchemaMerger},
     selection::Selection,
     Schema,
 };
@@ -30,13 +30,29 @@ use std::{collections::BTreeMap, sync::Arc};
 #[derive(Debug, Snafu)]
 #[allow(missing_copy_implementations, missing_docs)]
 pub enum Error {
-    #[snafu(display("Error creating plan for querying Ingester data to send to Querier"))]
+    #[snafu(display(
+        "Error creating plan for querying Ingester data to send to Querier: {}",
+        source
+    ))]
     FrontendError {
         source: iox_query::frontend::common::Error,
     },
 
-    #[snafu(display("Error building logical plan for querying Ingester data to send to Querier"))]
+    #[snafu(display(
+        "Error building logical plan for querying Ingester data to send to Querier: {}",
+        source
+    ))]
     LogicalPlan { source: DataFusionError },
+
+    #[snafu(display(
+        "Internal error merging schema on ingested data for table '{}': {}",
+        table_name,
+        source
+    ))]
+    SchemaMerge {
+        table_name: String,
+        source: schema::merge::Error,
+    },
 
     #[snafu(display(
         "Error building physical plan for querying Ingester data to send to Querier: {}",
@@ -130,17 +146,11 @@ pub async fn prepare_data_to_querier(
             unpersisted_partitions
                 .insert(partition.partition_id, partition.partition_status.clone());
 
-            let merged_schema = compute_merged_schema(&partition);
-
             // extract payload
             let partition_id = partition.partition_id;
-            let maybe_batch = prepare_data_to_querier_for_partition(
-                merged_schema,
-                ingest_data.exec(),
-                partition,
-                request,
-            )
-            .await?;
+            let maybe_batch =
+                prepare_data_to_querier_for_partition(ingest_data.exec(), partition, request)
+                    .await?;
             if let Some(batch) = maybe_batch {
                 batches.push(Arc::new(batch));
                 batch_partition_ids.push(partition_id);
@@ -195,17 +205,7 @@ pub async fn prepare_data_to_querier(
     ))
 }
 
-fn compute_merged_schema(unpersisted_partition_data: &UnpersistedPartitionData) -> Arc<Schema> {
-    let batches = unpersisted_partition_data
-        .snapshots()
-        .into_iter()
-        .map(|snapshot| snapshot.data.as_ref());
-
-    merge_record_batch_schemas2(batches)
-}
-
 async fn prepare_data_to_querier_for_partition(
-    merged_schema: Arc<Schema>,
     executor: &Executor,
     unpersisted_partition_data: UnpersistedPartitionData,
     request: &IngesterQueryRequest,
@@ -222,19 +222,10 @@ async fn prepare_data_to_querier_for_partition(
     };
     let predicate = request.predicate.clone().unwrap_or_default();
 
-    //let mut filter_applied_batches = vec![];
+    let table_name = Arc::from(request.table.as_str());
+    let chunks = unpersisted_partition_data.query_chunks(table_name);
 
-    let chunks = unpersisted_partition_data.chunks();
-
-    let stream = query(
-        &request.table,
-        merged_schema,
-        executor,
-        chunks,
-        predicate,
-        selection,
-    )
-    .await?;
+    let stream = query(&request.table, executor, chunks, predicate, selection).await?;
 
     let record_batches = datafusion::physical_plan::common::collect(stream)
         .await
@@ -289,9 +280,8 @@ async fn prepare_data_to_querier_for_partition(
 /// Return stream of record batches
 pub(crate) async fn query(
     table_name: &str,
-    merged_schema: Arc<Schema>,
     executor: &Executor,
-    data: Vec<Arc<dyn QueryChunk>>,
+    chunks: Vec<Arc<dyn QueryChunk>>,
     predicate: Predicate,
     selection: Selection<'_>,
 ) -> Result<SendableRecordBatchStream> {
@@ -304,11 +294,22 @@ pub(crate) async fn query(
     // managment
     let ctx = executor.new_context(ExecutorType::Query);
 
+    // since we only know about the schema of data that has been
+    // loaded into the ingester (not the schema from the catalog)
+    // merge all the chunk schemas together.
+    let merged_schema: Schema = chunks
+        .iter()
+        .try_fold(SchemaMerger::new(), |merger, chunk| {
+            merger.merge(chunk.schema().as_ref())
+        })
+        .context(SchemaMergeSnafu { table_name })?
+        .build();
+
     // Creates an execution plan for a scan and filter data of a single chunk
-    let logical_plan = ScanPlanBuilder::new(merged_schema)
+    let logical_plan = ScanPlanBuilder::new(Arc::new(merged_schema))
         .with_session_context(ctx.child_ctx("scan_and_filter planning"))
         .with_predicate(&predicate)
-        .with_chunks(data)
+        .with_chunks(chunks)
         .build()
         .context(FrontendSnafu)?
         .plan_builder

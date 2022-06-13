@@ -5,6 +5,7 @@ use crate::{
     lifecycle::LifecycleHandle,
     partioning::{Partitioner, PartitionerError},
     querier_handler::query,
+    query::SnapshotBatchAdapter,
 };
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
@@ -25,7 +26,7 @@ use observability_deps::tracing::{debug, warn};
 use parking_lot::RwLock;
 use parquet_file::storage::ParquetStorage;
 use predicate::Predicate;
-use schema::{merge::merge_record_batch_schemas2, selection::Selection, Schema};
+use schema::{selection::Selection, Schema};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -1034,25 +1035,38 @@ pub(crate) struct UnpersistedPartitionData {
 }
 
 impl UnpersistedPartitionData {
-    /// Return all snapshot batches in this partition data as chunks
-    pub(crate) fn snapshots(&self) -> Vec<Arc<SnapshotBatch>> {
+    /// Return all snapshot batches in this partition data as `QueryChunk`s
+    pub(crate) fn query_chunks(&self, table_name: Arc<str>) -> Vec<Arc<dyn QueryChunk>> {
         self.non_persisted
             .iter()
+            .map(|snapshot| {
+                let snapshot = Arc::clone(snapshot);
+                let delete_predicates = vec![];
+                let table_name = Arc::clone(&table_name);
+                Arc::new(SnapshotBatchAdapter::new(
+                    snapshot,
+                    delete_predicates,
+                    table_name,
+                )) as _
+            })
             .chain(
                 self.persisting
-                    .map(|persisting| persisting.data.iter())
+                    .as_ref()
+                    .map(|persisting| {
+                        persisting.data.iter().map(|snapshot| {
+                            let snapshot = Arc::clone(snapshot);
+                            let delete_predicates = persisting.delete_predicates.clone();
+                            let table_name = Arc::clone(&table_name);
+                            Arc::new(SnapshotBatchAdapter::new(
+                                snapshot,
+                                delete_predicates,
+                                table_name,
+                            )) as _
+                        })
+                    })
                     .into_iter()
                     .flatten(),
             )
-            .cloned()
-            .collect()
-    }
-
-    /// Return all snapshot batches in this partition data as chunks
-    pub(crate) fn chunks(&self) -> Vec<Arc<dyn QueryChunk>> {
-        self.snapshots()
-            .into_iter()
-            .map(|c| c as _) // tell compiler Snapshot is QueryChunk
             .collect()
     }
 }
@@ -1157,16 +1171,9 @@ impl PartitionData {
         let (min_sequencer_number, _) = query_batch.min_max_sequence_numbers();
         assert!(min_sequencer_number <= max_sequencer_number);
 
-        let batches = query_batch
-            .data
-            .iter()
-            .map(|snapshot| snapshot.data.as_ref());
-        let merged_schema = merge_record_batch_schemas2(batches);
-
         // Run query on the QueryableBatch to apply the tombstone.
         let stream = match query(
             table_name,
-            merged_schema,
             executor,
             vec![Arc::new(query_batch) as _],
             Predicate::default(),
@@ -1533,7 +1540,7 @@ pub struct QueryableBatch {
     pub(crate) delete_predicates: Vec<Arc<DeletePredicate>>,
 
     /// This is needed to return a reference for a trait function
-    pub(crate) table_name: String,
+    pub(crate) table_name: Arc<str>,
 }
 
 /// Status of a partition that has unpersisted data.

@@ -84,24 +84,6 @@ pub fn merge_record_batch_schemas(batches: &[Arc<RecordBatch>]) -> Arc<Schema> {
     Arc::new(merger.build())
 }
 
-/// TODO clean this up
-///
-/// Return the merged schema for RecordBatches
-///
-/// This is infallable because the schemas of chunks within a
-/// partition are assumed to be compatible because that schema was
-/// enforced as part of writing into the partition
-pub fn merge_record_batch_schemas2<'a>(
-    batches: impl IntoIterator<Item = &'a RecordBatch>,
-) -> Arc<Schema> {
-    let mut merger = SchemaMerger::new();
-    for batch in batches.into_iter() {
-        let schema = Schema::try_from(batch.schema()).expect("Schema conversion error");
-        merger = merger.merge(&schema).expect("Schemas compatible");
-    }
-    Arc::new(merger.build())
-}
-
 /// Schema Merger
 ///
 /// The usecase for merging schemas is when different chunks have

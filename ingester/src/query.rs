@@ -67,7 +67,7 @@ impl QueryableBatch {
         Self {
             data,
             delete_predicates,
-            table_name: table_name.to_string(),
+            table_name: Arc::from(table_name),
         }
     }
 
@@ -274,6 +274,185 @@ impl QueryChunk for QueryableBatch {
         let dummy_metrics = ExecutionPlanMetricsSet::new();
         let mem_metrics = MemTrackingMetrics::new(&dummy_metrics, 0);
         let stream = SizedRecordBatchStream::new(schema.as_arrow(), stream_batches, mem_metrics);
+        Ok(Box::pin(stream))
+    }
+
+    /// Returns chunk type
+    fn chunk_type(&self) -> &str {
+        "PersistingBatch"
+    }
+
+    // This function should not be used in PersistingBatch context
+    fn order(&self) -> ChunkOrder {
+        unimplemented!()
+    }
+}
+
+/// Adapts a [`SnapshotBatch`] to the format needed by the query
+/// system ([`QueryChunk`]).
+#[derive(Debug)]
+pub struct SnapshotBatchAdapter {
+    snapshot: Arc<SnapshotBatch>,
+    delete_predicates: Vec<Arc<DeletePredicate>>,
+    table_name: Arc<str>,
+    schema: Arc<Schema>,
+}
+
+impl SnapshotBatchAdapter {
+    /// Create a new wrapper around a [`SnapshotBatch`] that can be used as a [`QueryChunk`]
+    pub fn new(
+        snapshot: Arc<SnapshotBatch>,
+        delete_predicates: Vec<Arc<DeletePredicate>>,
+        table_name: Arc<str>,
+    ) -> Self {
+        // the batch was created in IOx so it has an IOx schema as well
+        let schema: Schema = snapshot
+            .data
+            .schema()
+            .try_into()
+            .expect("can not make IOx schema");
+
+        Self {
+            snapshot,
+            delete_predicates,
+            table_name,
+            schema: Arc::new(schema),
+        }
+    }
+}
+
+impl QueryChunkMeta for SnapshotBatchAdapter {
+    fn summary(&self) -> Option<&TableSummary> {
+        None
+    }
+
+    fn schema(&self) -> Arc<Schema> {
+        Arc::clone(&self.schema)
+    }
+
+    fn partition_sort_key(&self) -> Option<&SortKey> {
+        None // Ingester data has not persisted yet and should not be attached to any partition
+    }
+
+    fn partition_id(&self) -> Option<PartitionId> {
+        // Ingetser data is not officially attached to any parittion id yet.
+        // Only persisting & persisted data has partition id and we want to keep it that way
+        None
+    }
+
+    fn sort_key(&self) -> Option<&SortKey> {
+        None // Ingester data is not sorted
+    }
+
+    fn delete_predicates(&self) -> &[Arc<DeletePredicate>] {
+        self.delete_predicates.as_ref()
+    }
+
+    fn timestamp_min_max(&self) -> Option<TimestampMinMax> {
+        // Note: we need to consider which option we want to go with
+        //  . Return None here and avoid taking time to compute time's min max of RecordBacthes (current choice)
+        //  . Compute time's min max here and avoid compacting non-overlapped QueryableBatches in the Ingester
+        None
+    }
+}
+
+impl QueryChunk for SnapshotBatchAdapter {
+    // This function should not be used in SnapshotBatch context
+    fn id(&self) -> ChunkId {
+        // Should snapshot batches be ordered?
+        // TODO this chunk id is a relic of OG -- remove it
+        ChunkId::new_test(0)
+    }
+
+    /// Returns the name of the table stored in this chunk
+    fn table_name(&self) -> &str {
+        &self.table_name.as_ref()
+    }
+
+    /// Returns true if the chunk may contain a duplicate "primary
+    /// key" within itself
+    fn may_contain_pk_duplicates(&self) -> bool {
+        // always true because they are not deduplicated yet
+        true
+    }
+
+    /// Returns the result of applying the `predicate` to the chunk
+    /// using an efficient, but inexact method, based on metadata.
+    ///
+    /// NOTE: This method is suitable for calling during planning, and
+    /// may return PredicateMatch::Unknown for certain types of
+    /// predicates.
+    fn apply_predicate_to_metadata(
+        &self,
+        _predicate: &Predicate,
+    ) -> Result<PredicateMatch, QueryChunkError> {
+        Ok(PredicateMatch::Unknown)
+    }
+
+    /// Returns a set of Strings with column names from the specified
+    /// table that have at least one row that matches `predicate`, if
+    /// the predicate can be evaluated entirely on the metadata of
+    /// this Chunk. Returns `None` otherwise
+    fn column_names(
+        &self,
+        _ctx: IOxSessionContext,
+        _predicate: &Predicate,
+        _columns: Selection<'_>,
+    ) -> Result<Option<StringSet>, QueryChunkError> {
+        Ok(None)
+    }
+
+    /// Return a set of Strings containing the distinct values in the
+    /// specified columns. If the predicate can be evaluated entirely
+    /// on the metadata of this Chunk. Returns `None` otherwise
+    ///
+    /// The requested columns must all have String type.
+    fn column_values(
+        &self,
+        _ctx: IOxSessionContext,
+        _column_name: &str,
+        _predicate: &Predicate,
+    ) -> Result<Option<StringSet>, QueryChunkError> {
+        Ok(None)
+    }
+
+    /// Provides access to raw `QueryChunk` data as an
+    /// asynchronous stream of `RecordBatch`es filtered by a *required*
+    /// predicate. Note that not all chunks can evaluate all types of
+    /// predicates and this function will return an error
+    /// if requested to evaluate with a predicate that is not supported
+    ///
+    /// This is the analog of the `TableProvider` in DataFusion
+    ///
+    /// The reason we can't simply use the `TableProvider` trait
+    /// directly is that the data for a particular Table lives in
+    /// several chunks within a partition, so there needs to be an
+    /// implementation of `TableProvider` that stitches together the
+    /// streams from several different `QueryChunk`s.
+    fn read_filter(
+        &self,
+        mut ctx: IOxSessionContext,
+        _predicate: &Predicate,
+        selection: Selection<'_>,
+    ) -> Result<SendableRecordBatchStream, QueryChunkError> {
+        ctx.set_metadata("storage", "ingester");
+        ctx.set_metadata("projection", format!("{}", selection));
+        trace!(?selection, "selection");
+
+        // Predicates will be applied by the DataFusion plan. There is
+        // no further value to apply the predicates here as well
+        let batches = self
+            .snapshot
+            .scan(selection)
+            .context(FilterColumnsSnafu {})?
+            // convert Option to Iter
+            .into_iter()
+            .collect();
+
+        // Return stream of data
+        let dummy_metrics = ExecutionPlanMetricsSet::new();
+        let mem_metrics = MemTrackingMetrics::new(&dummy_metrics, 0);
+        let stream = SizedRecordBatchStream::new(self.schema().as_arrow(), batches, mem_metrics);
         Ok(Box::pin(stream))
     }
 
