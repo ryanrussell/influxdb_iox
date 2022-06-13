@@ -383,7 +383,7 @@ mod tests {
 
         // query without filters
         let exc = Executor::new(1);
-        let stream = query(&exc, batch, Predicate::default(), Selection::All)
+        let stream = query("test_table", &exc, vec![batch], Predicate::default(), Selection::All)
             .await
             .unwrap();
         let output_batches = datafusion::physical_plan::common::collect(stream)
@@ -424,7 +424,7 @@ mod tests {
         let pred = Predicate::default().with_expr(expr);
 
         let exc = Executor::new(1);
-        let stream = query(&exc, batch, pred, selection).await.unwrap();
+        let stream = query("test_table", &exc, vec![batch], pred, selection).await.unwrap();
         let output_batches = datafusion::physical_plan::common::collect(stream)
             .await
             .unwrap();
@@ -462,7 +462,7 @@ mod tests {
         let pred = Predicate::default().with_expr(expr);
 
         let exc = Executor::new(1);
-        let stream = query(&exc, batch, pred, selection).await.unwrap();
+        let stream = query("test_table", &exc, vec![batch], pred, selection).await.unwrap();
         let output_batches = datafusion::physical_plan::common::collect(stream)
             .await
             .unwrap();
