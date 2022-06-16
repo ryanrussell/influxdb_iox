@@ -121,56 +121,6 @@ impl AndExprBuilder {
     }
 }
 
-/// A RecordBatchStream created from in-memory RecordBatches.
-#[derive(Debug)]
-pub struct MemoryStream {
-    schema: SchemaRef,
-    batches: Vec<RecordBatch>,
-}
-
-impl MemoryStream {
-    /// Create new stream.
-    ///
-    /// Must at least pass one record batch!
-    pub fn new(batches: Vec<RecordBatch>) -> Self {
-        assert!(!batches.is_empty(), "must at least pass one record batch");
-        Self {
-            schema: batches[0].schema(),
-            batches,
-        }
-    }
-
-    /// Create new stream with provided schema.
-    pub fn new_with_schema(batches: Vec<RecordBatch>, schema: SchemaRef) -> Self {
-        Self { schema, batches }
-    }
-}
-
-impl RecordBatchStream for MemoryStream {
-    fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
-    }
-}
-
-impl futures::Stream for MemoryStream {
-    type Item = ArrowResult<RecordBatch>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        _: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        if self.batches.is_empty() {
-            Poll::Ready(None)
-        } else {
-            Poll::Ready(Some(Ok(self.batches.remove(0))))
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.batches.len(), Some(self.batches.len()))
-    }
-}
-
 #[derive(Debug)]
 /// Implements a [`SendableRecordBatchStream`] to help create DataFusion outputs
 /// from tokio channels.

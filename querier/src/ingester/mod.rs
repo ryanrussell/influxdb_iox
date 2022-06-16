@@ -10,7 +10,7 @@ use data_types::{
     ChunkId, ChunkOrder, ColumnSummary, InfluxDbType, PartitionId, SequenceNumber, SequencerId,
     StatValues, Statistics, TableSummary, TimestampMinMax,
 };
-use datafusion_util::MemoryStream;
+use datafusion::physical_plan::memory::MemoryStream;
 use futures::{stream::FuturesUnordered, TryStreamExt};
 use generated_types::{
     influxdata::iox::ingester::v1::GetWriteInfoResponse,
@@ -757,18 +757,12 @@ impl QueryChunk for IngesterPartition {
     ) -> Result<datafusion::physical_plan::SendableRecordBatchStream, QueryChunkError> {
         trace!(?predicate, ?selection, input_batches=?self.batches, "Reading data");
 
-        // Apply selection to in-memory batch
-        let batches = match self.schema.df_projection(selection)? {
-            None => self.batches.clone(),
-            Some(projection) => self
-                .batches
-                .iter()
-                .map(|batch| batch.project(&projection))
-                .collect::<std::result::Result<Vec<_>, ArrowError>>()?,
-        };
-        trace!(?predicate, ?selection, output_batches=?batches, input_batches=?self.batches, "Reading data");
+        let schema = self.schema();
+        let stream =
+            MemoryStream::try_new(batches, schema.as_arrow(), schema.df_projection(selection)?)
+                .expect("Creating memory stream");
 
-        Ok(Box::pin(MemoryStream::new(batches)))
+        Ok(Box::pin(stream))
     }
 
     fn chunk_type(&self) -> &str {
