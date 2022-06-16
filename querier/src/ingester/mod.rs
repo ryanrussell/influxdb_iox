@@ -758,9 +758,12 @@ impl QueryChunk for IngesterPartition {
         trace!(?predicate, ?selection, input_batches=?self.batches, "Reading data");
 
         let schema = self.schema();
-        let stream =
-            MemoryStream::try_new(batches, schema.as_arrow(), schema.df_projection(selection)?)
-                .expect("Creating memory stream");
+        let stream = MemoryStream::try_new(
+            self.batches.clone(),
+            schema.as_arrow(),
+            schema.df_projection(selection)?,
+        )
+        .expect("Creating memory stream");
 
         Ok(Box::pin(stream))
     }
