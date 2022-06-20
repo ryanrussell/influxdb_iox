@@ -57,7 +57,7 @@ async fn should_delete(
     cutoff: DateTime<Utc>,
     parquet_files: &mut dyn ParquetFileRepo,
 ) -> Result<bool> {
-    if item.last_modified < cutoff {
+    if cutoff < item.last_modified {
         // Not old enough; do not delete
         return Ok(false);
     }
@@ -76,7 +76,104 @@ async fn should_delete(
             // We have a reference to this file; do not delete
             return Ok(false);
         }
+    } else {
+        return Ok(true)
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use iox_catalog::{interface::Catalog, mem::MemCatalog};
+    use object_store::path::Path;
+
+    async fn test_catalog() -> (Arc<dyn Catalog>, ParquetFile) {
+        let metric_registry = Arc::new(metric::Registry::new());
+        let catalog = Arc::new(MemCatalog::new(Arc::clone(&metric_registry)));
+        let mut repos = catalog.repositories().await;
+        let kafka = repos.kafka_topics().create_or_get("foo").await.unwrap();
+        let pool = repos.query_pools().create_or_get("foo").await.unwrap();
+        let namespace = repos
+            .namespaces()
+            .create("namespace_parquet_file_test", "inf", kafka.id, pool.id)
+            .await
+            .unwrap();
+        let table = repos
+            .tables()
+            .create_or_get("test_table", namespace.id)
+            .await
+            .unwrap();
+
+        let parquet_file_params = ParquetFileParams {
+            sequencer_id: sequencer.id,
+            namespace_id: namespace.id,
+            table_id: partition.table_id,
+            partition_id: partition.id,
+            object_store_id,
+            min_sequence_number: SequenceNumber::new(10),
+            max_sequence_number: SequenceNumber::new(140),
+            min_time: Timestamp::new(1),
+            max_time: Timestamp::new(10),
+            file_size_bytes: 1337,
+            parquet_metadata: b"md1".to_vec(),
+            row_count: 0,
+            compaction_level: INITIAL_COMPACTION_LEVEL,
+            created_at: Timestamp::new(1),
+        };
+
+        let parquet_file = repos.parquet_files().create(parquet_file_params).unwrap();
+
+        (catalog, parquet_file)
+    }
+
+
+    #[tokio::test]
+    async fn dont_delete_new_file_in_catalog() {
+        let (catalog, file_in_catalog) = test_catalog().await;
+
+        let cutoff = Utc.datetime_from_str("2022-01-01T00:00:00z", "%+").unwrap();
+        let last_modified = Utc.datetime_from_str("2022-02-02T00:00:00z", "%+").unwrap();
+
+        let item = ObjectMeta {
+            location,
+            last_modified,
+            size: 0,
+        };
+
+        assert!(!should_delete(&item, cutoff, parquet_files).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn dont_delete_new_file_not_in_catalog() {
+        let metric_registry = Arc::new(metric::Registry::new());
+        let catalog: Arc<dyn Catalog> = Arc::new(MemCatalog::new(Arc::clone(&metric_registry)));
+        let mut repositories = catalog.repositories().await;
+        let parquet_files = repositories.parquet_files();
+
+        let cutoff = Utc.datetime_from_str("2022-01-01T00:00:00z", "%+").unwrap();
+        let last_modified = Utc.datetime_from_str("2022-02-02T00:00:00z", "%+").unwrap();
+
+        let item = ObjectMeta {
+            location: Path::from_raw("irrelevant"),
+            last_modified,
+            size: 0,
+        };
+
+        assert!(!should_delete(&item, cutoff, parquet_files).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn dont_delete_new_file_with_unparseable_path() {}
+
+    #[tokio::test]
+    async fn dont_delete_old_file_in_catalog() {}
+
+    #[tokio::test]
+    async fn delete_old_file_not_in_catalog() {}
+
+    #[tokio::test]
+    async fn delete_old_file_with_unparseable_path() {}
 }
