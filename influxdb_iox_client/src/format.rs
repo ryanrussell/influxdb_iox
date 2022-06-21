@@ -1,6 +1,6 @@
 //! Output formatting utilities for Arrow record batches
 
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, str::FromStr, io::Write};
 
 use thiserror::Error;
 
@@ -34,6 +34,10 @@ pub enum Error {
     /// Error converting JSON output to utf-8
     #[error("Error converting JSON output to UTF-8: {}", .0)]
     JsonUtf8(std::string::FromUtf8Error),
+
+    /// Error writing line protocol
+    #[error("Error converting JSON output to UTF-8: {}", .0)]
+    LineProtocol(std::io::Error),
 }
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -56,6 +60,7 @@ impl Display for QueryOutputFormat {
             QueryOutputFormat::Pretty => write!(f, "pretty"),
             QueryOutputFormat::Csv => write!(f, "csv"),
             QueryOutputFormat::Json => write!(f, "json"),
+            QueryOutputFormat::LineProtocol => write!(f, "lp"),
         }
     }
 }
@@ -125,6 +130,7 @@ impl QueryOutputFormat {
             Self::Pretty => batches_to_pretty(batches),
             Self::Csv => batches_to_csv(batches),
             Self::Json => batches_to_json(batches),
+            Self::LineProtocol => batches_to_lp(batches),
         }
     }
 }
@@ -160,6 +166,22 @@ fn batches_to_json(batches: &[RecordBatch]) -> Result<String> {
     let json = String::from_utf8(bytes).map_err(Error::JsonUtf8)?;
 
     Ok(json)
+}
+
+fn batches_to_lp(batches: &[RecordBatch]) -> Result<String> {
+    let mut bytes = vec![];
+
+    writeln!(&mut bytes, "Line protocol")
+        .map_err(Error::LineProtocol)?;
+
+    for batch in batches {
+        writeln!(&mut bytes, "batch schema: {:#?}", batch.schema())
+            .map_err(Error::LineProtocol)?;
+
+    }
+
+    let lp = String::from_utf8(bytes).map_err(Error::CsvUtf8)?;
+    Ok(lp)
 }
 
 #[cfg(test)]
