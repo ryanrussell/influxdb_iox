@@ -28,7 +28,7 @@ pub struct Config {
     #[clap(action)]
     query: String,
 
-    /// Optional format ('pretty', 'json', or 'csv')
+    /// Optional format ('pretty', 'json', 'lp' or 'csv')
     #[clap(short, long, default_value = "pretty", action)]
     format: String,
 }

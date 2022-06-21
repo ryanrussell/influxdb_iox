@@ -46,6 +46,8 @@ pub enum QueryOutputFormat {
     Csv,
     /// Arrow JSON format
     Json,
+    /// Line protocol format
+    LineProtocol,
 }
 
 impl Display for QueryOutputFormat {
@@ -72,6 +74,7 @@ impl FromStr for QueryOutputFormat {
             "pretty" => Ok(Self::Pretty),
             "csv" => Ok(Self::Csv),
             "json" => Ok(Self::Json),
+            "lp" => Ok(Self::LineProtocol),
             _ => Err(Error::Invalid(s.to_string())),
         }
     }
@@ -84,6 +87,7 @@ impl QueryOutputFormat {
             Self::Pretty => "text/plain",
             Self::Csv => "text/csv",
             Self::Json => "application/json",
+            Self::LineProtocol => "text/plain",
         }
     }
 }
