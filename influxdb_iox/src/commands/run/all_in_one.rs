@@ -502,17 +502,17 @@ pub async fn command(config: Config) -> Result<()> {
     )
     .await?;
 
-    info!("starting compactor");
-    let compactor = create_compactor_server_type(
-        &common_state,
-        Arc::clone(&metrics),
-        Arc::clone(&catalog),
-        Arc::clone(&object_store),
-        Arc::clone(&exec),
-        Arc::clone(&time_provider),
-        compactor_config,
-    )
-    .await?;
+    // info!("starting compactor");
+    // let compactor = create_compactor_server_type(
+    //     &common_state,
+    //     Arc::clone(&metrics),
+    //     Arc::clone(&catalog),
+    //     Arc::clone(&object_store),
+    //     Arc::clone(&exec),
+    //     Arc::clone(&time_provider),
+    //     compactor_config,
+    // )
+    // .await?;
 
     let ingester_addresses = vec![format!("http://{}", ingester_run_config.grpc_bind_address)];
     info!(?ingester_addresses, "starting querier");
@@ -533,7 +533,7 @@ pub async fn command(config: Config) -> Result<()> {
     let services = vec![
         Service::create(router, &router_run_config),
         Service::create_grpc_only(ingester, &ingester_run_config),
-        Service::create_grpc_only(compactor, &compactor_run_config),
+        //Service::create_grpc_only(compactor, &compactor_run_config),
         Service::create_grpc_only(querier, &querier_run_config),
     ];
 

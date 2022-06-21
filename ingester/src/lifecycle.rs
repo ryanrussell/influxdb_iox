@@ -301,7 +301,14 @@ impl LifecycleManager {
                       bytes_written=s.bytes_written,
                       partition_size_threshold=self.config.partition_size_threshold,
                       "Partition is over size threshold, persisting");
+            } else {
+                info!(sequencer_id=%s.sequencer_id,
+                      partition_id=%s.partition_id,
+                      bytes_written=s.bytes_written,
+                      partition_size_threshold=self.config.partition_size_threshold,
+                      "Partition is not over size threshold");
             }
+
 
             aged_out || sized_out || is_cold
         });
