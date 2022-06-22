@@ -53,6 +53,9 @@ pub struct LifecycleHandleImpl {
 }
 
 impl LifecycleHandle for LifecycleHandleImpl {
+
+    /// Updates the LifecycleManager's internal state to account for
+    /// `bytes_written` were ingested to `partition_id`
     fn log_write(
         &self,
         partition_id: PartitionId,
@@ -336,7 +339,7 @@ impl LifecycleManager {
         }
 
         // for the sequencers that are getting data persisted, keep track of what
-        // the highest seqeunce number was for each.
+        // the highest sequence number was for each.
         let mut sequencer_maxes = BTreeMap::new();
         for s in &to_persist {
             sequencer_maxes
