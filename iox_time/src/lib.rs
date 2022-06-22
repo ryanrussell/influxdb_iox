@@ -182,6 +182,9 @@ impl Time {
 }
 
 pub trait TimeProvider: std::fmt::Debug + Send + Sync + 'static {
+    /// Returns `self` as [`std::any::Any`] for runtime downcasts
+    fn as_any(&self) -> &dyn std::any::Any;
+
     /// Returns the current `Time`. No guarantees are made about monotonicity
     fn now(&self) -> Time;
 }
@@ -199,6 +202,10 @@ impl SystemProvider {
 impl TimeProvider for SystemProvider {
     fn now(&self) -> Time {
         Time(Utc::now())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -229,6 +236,10 @@ impl MockProvider {
 impl TimeProvider for MockProvider {
     fn now(&self) -> Time {
         *self.now.read()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

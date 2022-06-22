@@ -25,6 +25,7 @@ impl Job {
 /// The global job registry
 #[derive(Debug)]
 pub struct JobRegistry {
+    pub metric_registry: Arc<metric::Registry>,
     inner: Mutex<TaskRegistryWithMetrics<Job, TaskRegistryWithHistory<Job, TaskRegistry<Job>>>>,
 }
 
@@ -35,9 +36,13 @@ impl JobRegistry {
     ) -> Self {
         let registry = TaskRegistry::new(time_provider);
         let registry = TaskRegistryWithHistory::new(registry, JOB_HISTORY_SIZE);
-        let registry =
-            TaskRegistryWithMetrics::new(registry, metric_registry, Box::new(f_attributes));
+        let registry = TaskRegistryWithMetrics::new(
+            registry,
+            Arc::clone(&metric_registry),
+            Box::new(f_attributes),
+        );
         Self {
+            metric_registry,
             inner: Mutex::new(registry),
         }
     }
