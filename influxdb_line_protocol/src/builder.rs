@@ -92,6 +92,9 @@ impl <'a, W: Write> LineBuilder<'a, W> {
         Ok(self)
     }
 
+    pub fn field<F>(mut self, field_key: &str, field_value: F) -> Result<Self> {
+
+
     /// return a reference to the inner writer
     fn writer(&mut self) -> &mut W {
         self.lp_builder.inner_mut()
@@ -131,7 +134,10 @@ mod test {
         writer
             .line("m1")?
             .tag("foo", "bar")?
-            .tag("foo2", "blarg")?;
+            .tag("foo2", "blarg")?
+            .field("f1", 43f64)?
+            .field("f2", true)?
+            .timestamp(123)?;
 
 
         let lp = String::from_utf8(writer.into_inner()).unwrap();
@@ -139,6 +145,9 @@ mod test {
         assert_eq!(lp, "foo");
         Ok(())
     }
+
+    // test writing two lines
+
 
     // teset empty tag name
     // teset empty tag value
