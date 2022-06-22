@@ -53,7 +53,6 @@ pub struct LifecycleHandleImpl {
 }
 
 impl LifecycleHandle for LifecycleHandleImpl {
-
     /// Updates the LifecycleManager's internal state to account for
     /// `bytes_written` were ingested to `partition_id`
     fn log_write(
@@ -81,13 +80,45 @@ impl LifecycleHandle for LifecycleHandleImpl {
         stats.bytes_written += bytes_written;
         stats.last_write = now;
 
+        let partition_bytes_written = stats.bytes_written;
+
         s.total_bytes += bytes_written;
-        s.total_bytes > self.config.pause_ingest_size
+
+        // if overall ingest size exceeds limit, pause
+        if s.total_bytes > self.config.pause_ingest_size {
+            info!(
+                total_bytes = s.total_bytes,
+                pause_ingest_size = self.config.pause_ingest_size,
+                "Total ingested is over size threshold, pausing"
+            );
+            return true;
+        }
+
+        // if this partition's size exceeds limits and it already has
+        // an outstanding persist, pause further ingest
+        // https://github.com/influxdata/influxdb_iox/issues/4928
+        if partition_bytes_written > self.config.partition_size_threshold
+            && s.persists.contains_key(&partition_id)
+        {
+            info!(%partition_id,
+                      partition_bytes_written=partition_bytes_written,
+                      partition_size_threshold=self.config.partition_size_threshold,
+                      "Partition with ongoing persist is over size threshold, pausing");
+            s.persists.insert(partition_id, true);
+
+            return true;
+        }
+
+        // can keep consummng
+        false
     }
 
     fn can_resume_ingest(&self) -> bool {
         let s = self.state.lock();
-        s.total_bytes < self.config.pause_ingest_size
+        // resume ingest if
+        // 1. the total size is under cap and
+        // 2. we didn't pause due to outstanding persists
+        s.total_bytes < self.config.pause_ingest_size && s.persists.values().all(|f| !f)
     }
 }
 
@@ -176,12 +207,20 @@ impl LifecycleConfig {
 }
 
 #[derive(Default, Debug)]
+/// Core LifecycleManager state that maps partition_id to lifecycle stats
 struct LifecycleState {
+    /// total number of bytes the lifecycle manager is aware of across all sequencers and
+    /// partitions. Based on the mutable batch sizes received into all partitions.
     total_bytes: usize,
+    /// the stats for every partition the lifecycle manager is tracking.
     partition_stats: BTreeMap<PartitionId, PartitionLifecycleStats>,
+    /// partitions for which there is an outstanding persist
+    /// job. The entry is true if ingest was paused if that partition was full
+    persists: BTreeMap<PartitionId, bool>,
 }
 
 impl LifecycleState {
+    /// remove this partition from the current partition stats. Does not adjust `outstanding_persists`
     fn remove(&mut self, partition_id: &PartitionId) -> Option<PartitionLifecycleStats> {
         self.partition_stats.remove(partition_id).map(|stats| {
             self.total_bytes -= stats.bytes_written;
@@ -355,7 +394,7 @@ impl LifecycleManager {
         let persist_tasks: Vec<_> = to_persist
             .into_iter()
             .map(|s| {
-                self.remove(s.partition_id);
+                self.mark_persisting(s.partition_id);
                 let persister = Arc::clone(persister);
 
                 let (_tracker, registration) = self.job_registry.register(Job::Persist {
@@ -400,6 +439,8 @@ impl LifecycleManager {
                     .update_min_unpersisted_sequence_number(sequencer_id, min)
                     .await;
             }
+
+            self.mark_persisting_completed();
         }
     }
 
@@ -414,10 +455,17 @@ impl LifecycleManager {
         }
     }
 
-    /// Removes the partition from the state
-    fn remove(&self, partition_id: PartitionId) -> Option<PartitionLifecycleStats> {
+    /// Removes the partition from the state and marks it peristing
+    fn mark_persisting(&self, partition_id: PartitionId) {
         let mut s = self.state.lock();
-        s.remove(&partition_id)
+        s.remove(&partition_id);
+        s.persists.insert(partition_id, false);
+    }
+
+    /// clears all outstanding persisting marks
+    fn mark_persisting_completed(&self) {
+        let mut s = self.state.lock();
+        s.persists.clear();
     }
 }
 
@@ -462,6 +510,7 @@ mod tests {
     use iox_time::MockProvider;
     use metric::{Attributes, Registry};
     use std::collections::BTreeSet;
+    use tokio::sync::Barrier;
 
     #[derive(Default)]
     struct TestPersister {
@@ -495,6 +544,95 @@ mod tests {
         fn update_min_calls(&self) -> Vec<(SequencerId, SequenceNumber)> {
             let u = self.update_min_calls.lock();
             u.clone()
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    /// Synchronizes waiting on some test event
+    struct EventBarrier {
+        before: Arc<Barrier>,
+        after: Arc<Barrier>,
+    }
+
+    impl EventBarrier {
+        fn new() -> Self {
+            Self {
+                before: Arc::new(Barrier::new(2)),
+                after: Arc::new(Barrier::new(2)),
+            }
+        }
+    }
+
+    /// This persister will pause after persist is called
+    struct PausiblePersister {
+        inner: TestPersister,
+        events: Mutex<BTreeMap<PartitionId, EventBarrier>>,
+    }
+
+    impl PausiblePersister {
+        fn new() -> Self {
+            Self {
+                inner: TestPersister::default(),
+                events: Mutex::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Persister for PausiblePersister {
+        async fn persist(&self, partition_id: PartitionId) {
+            self.inner.persist(partition_id).await;
+            if let Some(event) = self.event(partition_id) {
+                event.before.wait().await;
+                event.after.wait().await;
+            }
+        }
+
+        async fn update_min_unpersisted_sequence_number(
+            &self,
+            sequencer_id: SequencerId,
+            sequence_number: SequenceNumber,
+        ) {
+            self.inner
+                .update_min_unpersisted_sequence_number(sequencer_id, sequence_number)
+                .await
+        }
+    }
+
+    impl PausiblePersister {
+        fn inner(&self) -> &TestPersister {
+            &self.inner
+        }
+
+        /// Wait until the persist operation has started
+        async fn wait_for_persist(&self, partition_id: PartitionId) {
+            let event = self
+                .event(partition_id)
+                .expect("partition not configured to wait");
+            event.before.wait().await;
+        }
+
+        /// Allow the persist operation to complete
+        async fn complete_persist(&self, partition_id: PartitionId) {
+            let event = self
+                .take_event(partition_id)
+                .expect("partition not configured to wait");
+            event.after.wait().await;
+        }
+
+        /// reset so a persist operation can begin again
+        fn pause_next(&self, partition_id: PartitionId) {
+            self.events.lock().insert(partition_id, EventBarrier::new());
+        }
+
+        /// get the event barrier configured for the specified partition
+        fn event(&self, partition_id: PartitionId) -> Option<EventBarrier> {
+            self.events.lock().get(&partition_id).cloned()
+        }
+
+        /// get the event barrier configured for the specified partition removing it
+        fn take_event(&self, partition_id: PartitionId) -> Option<EventBarrier> {
+            self.events.lock().remove(&partition_id)
         }
     }
 
@@ -569,7 +707,7 @@ mod tests {
         ));
         assert!(!h.can_resume_ingest());
 
-        m.remove(PartitionId::new(1));
+        m.mark_persisting(PartitionId::new(1));
         assert!(h.can_resume_ingest());
         assert!(!h.log_write(PartitionId::new(1), sequencer_id, SequenceNumber::new(3), 3));
     }
@@ -730,6 +868,87 @@ mod tests {
 
         let size_counter = get_counter(&metric_registry, "size");
         assert_eq!(size_counter, 1);
+    }
+
+    #[tokio::test]
+    /// Ensure ingest is paused if partition ingests faster than persist can keep up
+    async fn persists_existing_pauses_new() {
+        let config = LifecycleConfig {
+            pause_ingest_size: 30,
+            persist_memory_threshold: 20,
+            partition_size_threshold: 5,
+            partition_age_threshold: Duration::from_millis(100),
+            partition_cold_threshold: Duration::from_secs(500),
+        };
+        let TestLifecycleManger {
+            mut m,
+            metric_registry,
+            ..
+        } = TestLifecycleManger::new(config);
+        let sequencer_id = SequencerId::new(1);
+
+        let h = m.handle();
+        let state = Arc::clone(&m.state);
+
+        let partition_id = PartitionId::new(1);
+        let persister = Arc::new(PausiblePersister::new());
+        persister.pause_next(partition_id);
+
+        // write 7 bytes (over the 5 limit) which should trigger a persist
+        h.log_write(partition_id, sequencer_id, SequenceNumber::new(1), 7);
+        let captured_persister = Arc::clone(&persister);
+        let persist = tokio::task::spawn(async move {
+            m.maybe_persist(&captured_persister).await;
+            m
+        });
+
+        // wait for persist
+        persister.wait_for_persist(partition_id).await;
+        assert!(persister.inner().persist_called_for(partition_id));
+
+        // write 6 bytes into another partition, over the persist threshold, should be fine
+        let partition_id2 = PartitionId::new(2);
+        let should_pause = h.log_write(partition_id2, sequencer_id, SequenceNumber::new(2), 6);
+        assert!(!should_pause);
+        assert!(h.can_resume_ingest());
+
+        // write 6 more bytes in (while persist is still active), so
+        // the total outstanding (19) is which is under the total
+        // persist memory limit (20) but above the per-partition limit
+        // (5). Ingest should be paused
+        let should_pause = h.log_write(partition_id, sequencer_id, SequenceNumber::new(3), 7);
+        assert!(should_pause);
+        assert!(!h.can_resume_ingest());
+        assert!(config.pause_ingest_size > state.lock().total_bytes);
+
+        // allow persist operation to complete
+        persister.complete_persist(partition_id).await;
+        let mut m = persist.await.expect("task panic'd");
+
+        // ingest can proceed now
+        assert!(h.can_resume_ingest());
+
+        // persist should only have been called once
+        let size_counter = get_counter(&metric_registry, "size");
+        assert_eq!(size_counter, 1);
+
+        // prepare for the next persist operation
+        persister.pause_next(partition_id);
+
+        // verify that persist can actually run again
+        let captured_persister = Arc::clone(&persister);
+        let task = tokio::task::spawn(async move {
+            m.maybe_persist(&captured_persister).await;
+        });
+        persister.wait_for_persist(partition_id).await;
+        assert!(h.can_resume_ingest());
+        persister.complete_persist(partition_id).await;
+        task.await.expect("task panic'd");
+        assert!(h.can_resume_ingest());
+
+        // persist should have been called again for partition_id and for partition_id2
+        let size_counter = get_counter(&metric_registry, "size");
+        assert_eq!(size_counter, 3);
     }
 
     #[tokio::test]
