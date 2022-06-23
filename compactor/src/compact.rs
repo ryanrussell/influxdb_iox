@@ -29,7 +29,7 @@ use parquet_file::{metadata::IoxMetadata, storage::ParquetStorage};
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{
     cmp::{max, min, Ordering},
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::DerefMut,
     sync::Arc,
 };
@@ -317,6 +317,7 @@ impl Compactor {
                 let mut p = partitions.entry(f.partition_id).or_insert_with(|| {
                     PartitionCompactionCandidate {
                         sequencer_id: *sequencer_id,
+                        namespace_id: f.namespace_id,
                         table_id: f.table_id,
                         partition_id: f.partition_id,
                         level_0_file_count: 0,
@@ -358,11 +359,50 @@ impl Compactor {
         Ok(candidates)
     }
 
-    /// Fetch the partition information stored in the catalog.
-    async fn get_partition_from_catalog(
+    /// Add namespace and table information to partition candidates.
+    pub async fn add_info_to_partitions(
         &self,
-        partition_id: PartitionId,
-    ) -> Result<(Namespace, Table, Partition)> {
+        partitions: &[PartitionCompactionCandidate],
+    ) -> Result<Vec<PartitionCompactionCandidateWithInfo>> {
+        let mut repos = self.catalog.repositories().await;
+
+        let table_ids: HashSet<_> = partitions.iter().map(|p| p.table_id).collect();
+        let namespace_ids: HashSet<_> = partitions.iter().map(|p| p.namespace_id).collect();
+
+        let mut tables = HashMap::with_capacity(table_ids.len());
+        for id in table_ids {
+            let table = repos
+                .tables()
+                .get_by_id(id)
+                .await
+                .context(QueryingTableSnafu)?
+                .context(TableNotFoundSnafu { table_id: id })?;
+            tables.insert(id, Arc::new(table));
+        }
+
+        let mut namespaces = HashMap::with_capacity(namespace_ids.len());
+        for id in namespace_ids {
+            let namespace = repos
+                .namespaces()
+                .get_by_id(id)
+                .await
+                .context(QueryingNamespaceSnafu)?
+                .context(NamespaceNotFoundSnafu { namespace_id: id })?;
+            namespaces.insert(id, Arc::new(namespace));
+        }
+
+        Ok(partitions
+            .iter()
+            .map(|p| PartitionCompactionCandidateWithInfo {
+                table: Arc::clone(tables.get(&p.table_id).expect("just queried")),
+                namespace: Arc::clone(namespaces.get(&p.namespace_id).expect("just queried")),
+                candidate: p.clone(),
+            })
+            .collect())
+    }
+
+    /// Fetch the partition information stored in the catalog.
+    async fn get_partition_from_catalog(&self, partition_id: PartitionId) -> Result<Partition> {
         let mut repos = self.catalog.repositories().await;
 
         let partition = repos
@@ -372,25 +412,7 @@ impl Compactor {
             .context(QueryingPartitionSnafu)?
             .context(PartitionNotFoundSnafu { partition_id })?;
 
-        let table = repos
-            .tables()
-            .get_by_id(partition.table_id)
-            .await
-            .context(QueryingTableSnafu)?
-            .context(TableNotFoundSnafu {
-                table_id: partition.table_id,
-            })?;
-
-        let namespace = repos
-            .namespaces()
-            .get_by_id(table.namespace_id)
-            .await
-            .context(QueryingNamespaceSnafu)?
-            .context(NamespaceNotFoundSnafu {
-                namespace_id: table.namespace_id,
-            })?;
-
-        Ok((namespace, table, partition))
+        Ok(partition)
     }
 
     /// Group files to be compacted together and level-0 files that will get upgraded
@@ -461,6 +483,8 @@ impl Compactor {
     /// files will be non-overlapping in time.
     pub async fn compact_partition(
         &self,
+        namespace: &Namespace,
+        table: &Table,
         partition_id: PartitionId,
         compact_and_upgrade: CompactAndUpgrade,
     ) -> Result<()> {
@@ -471,7 +495,7 @@ impl Compactor {
         info!("compacting partition {}", partition_id);
         let start_time = self.time_provider.now();
 
-        let (namespace, table, partition) = self.get_partition_from_catalog(partition_id).await?;
+        let partition = self.get_partition_from_catalog(partition_id).await?;
 
         let mut file_count = 0;
 
@@ -505,7 +529,7 @@ impl Compactor {
             // caller. If an error occurs during object store upload, it will be
             // retried indefinitely.
             let catalog_update_info = self
-                .compact(group.parquet_files, &namespace, &table, &partition)
+                .compact(group.parquet_files, namespace, table, &partition)
                 .await?
                 .into_iter()
                 .map(|v| async {
@@ -1121,7 +1145,8 @@ impl Compactor {
 }
 
 /// Summary information for a partition that is a candidate for compaction.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[allow(missing_copy_implementations)] // shouldn't be silently cloned
 pub struct PartitionCompactionCandidate {
     /// the sequencer the partition is in
     pub sequencer_id: SequencerId,
@@ -1129,12 +1154,27 @@ pub struct PartitionCompactionCandidate {
     pub table_id: TableId,
     /// the partition for compaction
     pub partition_id: PartitionId,
+    /// namespace ID
+    pub namespace_id: NamespaceId,
     /// the number of level 0 files in the partition
     pub level_0_file_count: usize,
     /// the total bytes of the level 0 files to compact
     pub file_size_bytes: i64,
     /// the created_at time of the oldest level 0 file in the partition
     pub oldest_file: Timestamp,
+}
+
+/// [`PartitionCompactionCandidate`] with some information about its table and namespace.
+#[derive(Debug)]
+pub struct PartitionCompactionCandidateWithInfo {
+    /// Partition compaction candidate.
+    pub candidate: PartitionCompactionCandidate,
+
+    /// Namespace.
+    pub namespace: Arc<Namespace>,
+
+    /// Table.
+    pub table: Arc<Table>,
 }
 
 #[cfg(test)]
@@ -1228,7 +1268,12 @@ mod tests {
             .await
             .unwrap();
         compactor
-            .compact_partition(partition.partition.id, compact_and_upgrade)
+            .compact_partition(
+                &ns.namespace,
+                &table.table,
+                partition.partition.id,
+                compact_and_upgrade,
+            )
             .await
             .unwrap();
 
@@ -1437,7 +1482,12 @@ mod tests {
             .await
             .unwrap();
         compactor
-            .compact_partition(partition.partition.id, compact_and_upgrade)
+            .compact_partition(
+                &ns.namespace,
+                &table.table,
+                partition.partition.id,
+                compact_and_upgrade,
+            )
             .await
             .unwrap();
 
@@ -3125,6 +3175,7 @@ mod tests {
                 sequencer_id: sequencer.id,
                 table_id: table.id,
                 partition_id: partition.id,
+                namespace_id: namespace.id,
                 level_0_file_count: 2,
                 file_size_bytes: 1337 * 2,
                 oldest_file: pf1.created_at,
@@ -3133,6 +3184,7 @@ mod tests {
                 sequencer_id: sequencer.id,
                 table_id: table.id,
                 partition_id: partition3.id,
+                namespace_id: namespace.id,
                 level_0_file_count: 1,
                 file_size_bytes: 20000,
                 oldest_file: pf4.created_at,
@@ -3141,6 +3193,7 @@ mod tests {
                 sequencer_id: sequencer.id,
                 table_id: table.id,
                 partition_id: partition2.id,
+                namespace_id: namespace.id,
                 level_0_file_count: 1,
                 file_size_bytes: 1337,
                 oldest_file: pf3.created_at,
