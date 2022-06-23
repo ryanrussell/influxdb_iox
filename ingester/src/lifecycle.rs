@@ -101,12 +101,13 @@ impl LifecycleHandle for LifecycleHandleImpl {
         // This is designed to protect the ingester from OOMing by
         // when partitions have higher write throughput than persist
         // throughput (e.g. during a long recovery when data in kafka
-        // is plentify or if there is something about a particular
+        // is plentiful or if there is something about a particular
         // persist operation that is abnormally slow).
         //
-        // We pause all ingest if *any* partition exceeds its limit
-        // because persists happen in batches so *no* new persist will
-        // start until outstanding persists are complete.
+        // We pause all ingest if *any* partition exceeds its limit whilst there
+        // is an ongoing persist operation, because persists happen in batches
+        // so *no* new persist will start until outstanding persists are
+        // complete.
         //
         // More details: https://github.com/influxdata/influxdb_iox/issues/4928
         if partition_bytes_written > self.config.partition_size_threshold
@@ -120,7 +121,7 @@ impl LifecycleHandle for LifecycleHandleImpl {
             return true;
         }
 
-        // can keep consummng
+        // can keep consuming
         false
     }
 
@@ -537,7 +538,7 @@ impl LifecycleManager {
         }
     }
 
-    /// Removes the partition from the state and marks it peristing
+    /// Removes the partition from the state and marks it persisting
     fn mark_persisting(&self, partition_id: PartitionId) {
         let mut s = self.state.lock();
         s.remove(&partition_id);
