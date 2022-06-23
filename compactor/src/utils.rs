@@ -142,12 +142,6 @@ impl ParquetFileWithTombstone {
             partition_sort_key,
         )
     }
-
-    /// Return iox metadata of the parquet file
-    pub fn iox_metadata(&self) -> IoxMetadata {
-        let decoded_parquet_file = DecodedParquetFile::new((*self.data).clone());
-        decoded_parquet_file.iox_metadata
-    }
 }
 
 /// Struct holding output of a compacted stream

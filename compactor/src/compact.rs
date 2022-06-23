@@ -10,8 +10,8 @@ use crate::{
 };
 use backoff::BackoffConfig;
 use data_types::{
-    ParquetFile, ParquetFileId, ParquetFileWithMetadata, Partition, PartitionId, SequencerId,
-    TableId, Timestamp, Tombstone, TombstoneId,
+    Namespace, NamespaceId, ParquetFile, ParquetFileId, ParquetFileWithMetadata, Partition,
+    PartitionId, SequencerId, Table, TableId, Timestamp, Tombstone, TombstoneId,
 };
 use datafusion::error::DataFusionError;
 use futures::stream::{FuturesUnordered, TryStreamExt};
@@ -111,8 +111,24 @@ pub enum Error {
         source: iox_catalog::interface::Error,
     },
 
+    #[snafu(display("Error querying table {}", source))]
+    QueryingTable {
+        source: iox_catalog::interface::Error,
+    },
+
+    #[snafu(display("Error querying namespace {}", source))]
+    QueryingNamespace {
+        source: iox_catalog::interface::Error,
+    },
+
     #[snafu(display("Could not find partition {:?}", partition_id))]
     PartitionNotFound { partition_id: PartitionId },
+
+    #[snafu(display("Could not find table {:?}", table_id))]
+    TableNotFound { table_id: TableId },
+
+    #[snafu(display("Could not find namespace {:?}", namespace_id))]
+    NamespaceNotFound { namespace_id: NamespaceId },
 
     #[snafu(display("Could not serialize and persist record batches {}", source))]
     Persist {
@@ -343,15 +359,38 @@ impl Compactor {
     }
 
     /// Fetch the partition information stored in the catalog.
-    async fn get_partition_from_catalog(&self, partition_id: PartitionId) -> Result<Partition> {
+    async fn get_partition_from_catalog(
+        &self,
+        partition_id: PartitionId,
+    ) -> Result<(Namespace, Table, Partition)> {
         let mut repos = self.catalog.repositories().await;
+
         let partition = repos
             .partitions()
             .get_by_id(partition_id)
             .await
             .context(QueryingPartitionSnafu)?
             .context(PartitionNotFoundSnafu { partition_id })?;
-        Ok(partition)
+
+        let table = repos
+            .tables()
+            .get_by_id(partition.table_id)
+            .await
+            .context(QueryingTableSnafu)?
+            .context(TableNotFoundSnafu {
+                table_id: partition.table_id,
+            })?;
+
+        let namespace = repos
+            .namespaces()
+            .get_by_id(table.namespace_id)
+            .await
+            .context(QueryingNamespaceSnafu)?
+            .context(NamespaceNotFoundSnafu {
+                namespace_id: table.namespace_id,
+            })?;
+
+        Ok((namespace, table, partition))
     }
 
     /// Group files to be compacted together and level-0 files that will get upgraded
@@ -432,7 +471,7 @@ impl Compactor {
         info!("compacting partition {}", partition_id);
         let start_time = self.time_provider.now();
 
-        let partition = self.get_partition_from_catalog(partition_id).await?;
+        let (namespace, table, partition) = self.get_partition_from_catalog(partition_id).await?;
 
         let mut file_count = 0;
 
@@ -466,7 +505,7 @@ impl Compactor {
             // caller. If an error occurs during object store upload, it will be
             // retried indefinitely.
             let catalog_update_info = self
-                .compact(group.parquet_files, &partition)
+                .compact(group.parquet_files, &namespace, &table, &partition)
                 .await?
                 .into_iter()
                 .map(|v| async {
@@ -614,6 +653,8 @@ impl Compactor {
     async fn compact(
         &self,
         overlapped_files: Vec<ParquetFileWithTombstone>,
+        namespace: &Namespace,
+        table: &Table,
         partition: &Partition,
     ) -> Result<Vec<CompactedData>> {
         debug!(num_files = overlapped_files.len(), "compact files");
@@ -628,13 +669,10 @@ impl Compactor {
             return Ok(vec![]);
         }
 
-        // Save the parquet metadata for the first file to reuse IDs and names
-        let iox_metadata = overlapped_files[0].iox_metadata();
-
         // Hold onto various metadata items needed later.
-        let sequencer_id = overlapped_files[0].sequencer_id;
-        let namespace_id = overlapped_files[0].namespace_id;
-        let table_id = overlapped_files[0].table_id;
+        let sequencer_id = partition.sequencer_id;
+        let namespace_id = table.namespace_id;
+        let table_id = table.id;
 
         //  Collect all unique tombstone
         let mut tombstone_map = overlapped_files[0].tombstone_map();
@@ -675,7 +713,7 @@ impl Compactor {
             .map(|f| {
                 f.to_queryable_parquet_chunk(
                     self.store.clone(),
-                    iox_metadata.table_name.to_string(),
+                    table.name.clone(),
                     partition.sort_key(),
                 )
             })
@@ -764,13 +802,13 @@ impl Compactor {
             let meta = IoxMetadata {
                 object_store_id: Uuid::new_v4(),
                 creation_timestamp: self.time_provider.now(),
-                sequencer_id: iox_metadata.sequencer_id,
-                namespace_id: iox_metadata.namespace_id,
-                namespace_name: Arc::<str>::clone(&iox_metadata.namespace_name),
-                table_id: iox_metadata.table_id,
-                table_name: Arc::<str>::clone(&iox_metadata.table_name),
-                partition_id: iox_metadata.partition_id,
-                partition_key: iox_metadata.partition_key.clone(),
+                sequencer_id: partition.sequencer_id,
+                namespace_id: table.namespace_id,
+                namespace_name: namespace.name.clone().into(),
+                table_id: table.id,
+                table_name: table.name.clone().into(),
+                partition_id: partition.id,
+                partition_key: partition.partition_key.clone(),
                 min_sequence_number,
                 max_sequence_number,
                 compaction_level: 1, // compacted result file always have level 1
@@ -1512,7 +1550,7 @@ mod tests {
         // ------------------------------------------------
         // no files provided
         let result = compactor
-            .compact(vec![], &partition.partition)
+            .compact(vec![], &ns.namespace, &table.table, &partition.partition)
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -1522,7 +1560,12 @@ mod tests {
         let mut pf = ParquetFileWithTombstone::new(Arc::new(parquet_file), vec![]);
         // Nothing compacted for one file without tombstones
         let result = compactor
-            .compact(vec![pf.clone()], &partition.partition)
+            .compact(
+                vec![pf.clone()],
+                &ns.namespace,
+                &table.table,
+                &partition.partition,
+            )
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -1537,7 +1580,7 @@ mod tests {
 
         // should have compacted data
         let batches = compactor
-            .compact(vec![pf], &partition.partition)
+            .compact(vec![pf], &ns.namespace, &table.table, &partition.partition)
             .await
             .unwrap();
         // 2 sets based on the split rule
@@ -1630,7 +1673,7 @@ mod tests {
 
         // should have compacted datas
         let batches = compactor
-            .compact(vec![pf], &partition.partition)
+            .compact(vec![pf], &ns.namespace, &table.table, &partition.partition)
             .await
             .unwrap();
         // 1 output set becasue split rule = 100%
@@ -1724,7 +1767,12 @@ mod tests {
 
         // Compact them
         let batches = compactor
-            .compact(vec![pf1, pf2], &partition.partition)
+            .compact(
+                vec![pf1, pf2],
+                &ns.namespace,
+                &table.table,
+                &partition.partition,
+            )
             .await
             .unwrap();
         // 2 sets based on the split rule
@@ -1849,6 +1897,8 @@ mod tests {
         let batches = compactor
             .compact(
                 vec![pf1.clone(), pf2.clone(), pf3.clone()],
+                &ns.namespace,
+                &table.table,
                 &partition.partition,
             )
             .await
@@ -3152,7 +3202,12 @@ mod tests {
         let partition = partition.update_sort_key(sort_key).await;
 
         let batches = compactor
-            .compact(vec![pf1, pf2], &partition.partition)
+            .compact(
+                vec![pf1, pf2],
+                &ns.namespace,
+                &table.table,
+                &partition.partition,
+            )
             .await
             .unwrap();
 
