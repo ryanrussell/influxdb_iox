@@ -676,7 +676,6 @@ impl Compactor {
                 f.to_queryable_parquet_chunk(
                     self.store.clone(),
                     iox_metadata.table_name.to_string(),
-                    f.iox_metadata().sort_key,
                     partition.sort_key(),
                 )
             })
@@ -1974,12 +1973,10 @@ mod tests {
             ParquetStorage::new(Arc::clone(&catalog.object_store)),
             table.table.name.clone(),
             partition.partition.sort_key(),
-            partition.partition.sort_key(),
         );
         let pc2 = pt2.to_queryable_parquet_chunk(
             ParquetStorage::new(Arc::clone(&catalog.object_store)),
             table.table.name.clone(),
-            partition.partition.sort_key(),
             partition.partition.sort_key(),
         );
 

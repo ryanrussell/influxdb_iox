@@ -108,10 +108,10 @@ impl ParquetFileWithTombstone {
         &self,
         store: ParquetStorage,
         table_name: String,
-        sort_key: Option<SortKey>,
         partition_sort_key: Option<SortKey>,
     ) -> QueryableParquetChunk {
         let decoded_parquet_file = DecodedParquetFile::new((*self.data).clone());
+        let sort_key = decoded_parquet_file.sort_key().cloned();
 
         let parquet_chunk = ParquetChunk::new(
             Arc::new(decoded_parquet_file.parquet_file.clone()),
