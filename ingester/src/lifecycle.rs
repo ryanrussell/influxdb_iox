@@ -89,23 +89,34 @@ impl LifecycleHandle for LifecycleHandleImpl {
             info!(
                 total_bytes = s.total_bytes,
                 pause_ingest_size = self.config.pause_ingest_size,
-                "Total ingested is over size threshold, pausing"
+                "Total ingested size is over size threshold, pausing"
             );
             return true;
         }
 
-        // if this partition's size exceeds limits and it already has
-        // an outstanding persist, pause further ingest
-        // https://github.com/influxdata/influxdb_iox/issues/4928
+        // If this partition's size exceeds its threshold and the
+        // ingester has outstanding persist, pause further ingest
+        // until outstanding persists are complete.
+        //
+        // This is designed to protect the ingester from OOMing by
+        // when partitions have higher write throughput than persist
+        // throughput (e.g. during a long recovery when data in kafka
+        // is plentify or if there is something about a particular
+        // persist operation that is abnormally slow).
+        //
+        // We pause all ingest if *any* partition exceeds its limit
+        // because persists happen in batches so *no* new persist will
+        // start until outstanding persists are complete.
+        //
+        // More details: https://github.com/influxdata/influxdb_iox/issues/4928
         if partition_bytes_written > self.config.partition_size_threshold
-            && s.persists.contains_key(&partition_id)
+            && s.persist_state.persisting()
         {
             info!(%partition_id,
-                      partition_bytes_written=partition_bytes_written,
-                      partition_size_threshold=self.config.partition_size_threshold,
-                      "Partition with ongoing persist is over size threshold, pausing");
-            s.persists.insert(partition_id, true);
-
+                  partition_bytes_written=partition_bytes_written,
+                  partition_size_threshold=self.config.partition_size_threshold,
+                  "Partition exceeded size threshold with ongoing persist, pausing");
+            s.persist_state = s.persist_state.pause();
             return true;
         }
 
@@ -117,8 +128,8 @@ impl LifecycleHandle for LifecycleHandleImpl {
         let s = self.state.lock();
         // resume ingest if
         // 1. the total size is under cap and
-        // 2. we didn't pause due to outstanding persists
-        s.total_bytes < self.config.pause_ingest_size && s.persists.values().all(|f| !f)
+        // 2. we didn't pause due to partition size with outstanding persists
+        s.total_bytes < self.config.pause_ingest_size && !s.persist_state.paused()
     }
 }
 
@@ -214,9 +225,80 @@ struct LifecycleState {
     total_bytes: usize,
     /// the stats for every partition the lifecycle manager is tracking.
     partition_stats: BTreeMap<PartitionId, PartitionLifecycleStats>,
-    /// partitions for which there is an outstanding persist
-    /// job. The entry is true if ingest was paused if that partition was full
-    persists: BTreeMap<PartitionId, bool>,
+    /// True if there is any outstanding persist
+    persist_state: PersistState,
+}
+
+#[derive(Debug, Clone, Copy)]
+/// Tracks the outstanding persistence state of the ingester.
+///
+/// Persistence decisions happen in a batch -- each call to
+/// `maybe_persist` figures out which partitions to persist, and then
+/// doesn't return until those partitions have completely persisted.
+///
+/// State transition diagram:
+///
+/// ```text
+///                +----+             +----+
+///                |    v             |    v
+/// (None) ---> (Outstanding) --> (IngestPaused)
+///  ^ ^           |                  |
+///  | +---------- +                  |
+///  +--------------------------------+
+/// ```
+enum PersistState {
+    /// No persist operations are outstanding
+    None,
+    /// One or more persist operation are outstanding
+    Outstanding,
+    /// Ingest was paused because a partition exceeded its threshold
+    /// while persists are outstanding
+    IngestPaused,
+}
+
+impl Default for PersistState {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl PersistState {
+    /// return true if ingest was paused
+    fn paused(&self) -> bool {
+        matches!(self, Self::IngestPaused)
+    }
+
+    /// pause this state
+    fn pause(self) -> Self {
+        match self {
+            Self::None => unreachable!("Invalid transition"),
+            Self::Outstanding | Self::IngestPaused => Self::IngestPaused,
+        }
+    }
+
+    /// return true if ingest is persisting
+    fn persisting(&self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Outstanding | Self::IngestPaused => true,
+        }
+    }
+
+    /// Mark this state as persisting
+    fn persist(self) -> Self {
+        match self {
+            Self::None | Self::Outstanding => Self::Outstanding,
+            _ => unreachable!("Invalid state"),
+        }
+    }
+
+    /// Mark persist as completed
+    fn persist_completed(self) -> Self {
+        match self {
+            Self::IngestPaused | Self::Outstanding => Self::None,
+            _ => unreachable!("Invalid state"),
+        }
+    }
 }
 
 impl LifecycleState {
@@ -459,13 +541,14 @@ impl LifecycleManager {
     fn mark_persisting(&self, partition_id: PartitionId) {
         let mut s = self.state.lock();
         s.remove(&partition_id);
-        s.persists.insert(partition_id, false);
+
+        s.persist_state = s.persist_state.persist();
     }
 
     /// clears all outstanding persisting marks
     fn mark_persisting_completed(&self) {
         let mut s = self.state.lock();
-        s.persists.clear();
+        s.persist_state = s.persist_state.persist_completed();
     }
 }
 
@@ -906,17 +989,18 @@ mod tests {
         persister.wait_for_persist(partition_id).await;
         assert!(persister.inner().persist_called_for(partition_id));
 
-        // write 6 bytes into another partition, over the persist threshold, should be fine
+        // write 6 bytes into another partition, over the persist
+        // threshold, should also pause (as persists happen in batches)
         let partition_id2 = PartitionId::new(2);
         let should_pause = h.log_write(partition_id2, sequencer_id, SequenceNumber::new(2), 6);
-        assert!(!should_pause);
-        assert!(h.can_resume_ingest());
+        assert!(should_pause);
+        assert!(!h.can_resume_ingest());
 
         // write 6 more bytes in (while persist is still active), so
         // the total outstanding (19) is which is under the total
         // persist memory limit (20) but above the per-partition limit
-        // (5). Ingest should be paused
-        let should_pause = h.log_write(partition_id, sequencer_id, SequenceNumber::new(3), 7);
+        // (5). Ingest should still be paused
+        let should_pause = h.log_write(partition_id, sequencer_id, SequenceNumber::new(3), 6);
         assert!(should_pause);
         assert!(!h.can_resume_ingest());
         assert!(config.pause_ingest_size > state.lock().total_bytes);
