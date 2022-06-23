@@ -648,12 +648,12 @@ mod tests {
     }
 
     /// This persister will pause after persist is called
-    struct PausiblePersister {
+    struct PausablePersister {
         inner: TestPersister,
         events: Mutex<BTreeMap<PartitionId, EventBarrier>>,
     }
 
-    impl PausiblePersister {
+    impl PausablePersister {
         fn new() -> Self {
             Self {
                 inner: TestPersister::default(),
@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Persister for PausiblePersister {
+    impl Persister for PausablePersister {
         async fn persist(&self, partition_id: PartitionId) {
             self.inner.persist(partition_id).await;
             if let Some(event) = self.event(partition_id) {
@@ -683,7 +683,7 @@ mod tests {
         }
     }
 
-    impl PausiblePersister {
+    impl PausablePersister {
         fn inner(&self) -> &TestPersister {
             &self.inner
         }
@@ -975,7 +975,7 @@ mod tests {
         let state = Arc::clone(&m.state);
 
         let partition_id = PartitionId::new(1);
-        let persister = Arc::new(PausiblePersister::new());
+        let persister = Arc::new(PausablePersister::new());
         persister.pause_next(partition_id);
 
         // write 7 bytes (over the 5 limit) which should trigger a persist
