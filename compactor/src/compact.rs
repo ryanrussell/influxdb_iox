@@ -1164,7 +1164,8 @@ pub struct PartitionCompactionCandidate {
     pub oldest_file: Timestamp,
 }
 
-/// [`PartitionCompactionCandidate`] with some information about its table and namespace.
+/// [`PartitionCompactionCandidate`] with information from the catalog
+/// about its table and namespace.
 #[derive(Debug)]
 pub struct PartitionCompactionCandidateWithInfo {
     /// Partition compaction candidate.
