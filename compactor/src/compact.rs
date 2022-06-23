@@ -1105,14 +1105,15 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use arrow_util::assert_batches_sorted_eq;
     use data_types::{
-        ChunkId, ColumnSet, KafkaPartition, NamespaceId, ParquetFileParams, SequenceNumber,
+        ChunkId, ColumnSet, ColumnType, KafkaPartition, NamespaceId, ParquetFileParams,
+        SequenceNumber,
     };
     use futures::{stream::FuturesOrdered, StreamExt, TryStreamExt};
-    use iox_catalog::interface::INITIAL_COMPACTION_LEVEL;
+    use iox_catalog::interface::{get_schema_by_id, INITIAL_COMPACTION_LEVEL};
     use iox_tests::util::TestCatalog;
     use iox_time::SystemProvider;
-    use parquet_file::{chunk::DecodedParquetFile, ParquetFilePath};
-    use schema::sort::SortKey;
+    use parquet_file::ParquetFilePath;
+    use schema::{sort::SortKey, Schema};
     use std::sync::atomic::{AtomicI64, Ordering};
 
     // Simulate unique ID generation
@@ -1127,14 +1128,17 @@ mod tests {
         let catalog = TestCatalog::new();
 
         let lp = vec![
-            "table,tag1=WA field_int=1000 8000",
-            "table,tag1=VT field_int=10 10000",
-            "table,tag1=UT field_int=70 20000",
+            "table,tag1=WA field_int=1000i 8000",
+            "table,tag1=VT field_int=10i 10000",
+            "table,tag1=UT field_int=70i 20000",
         ]
         .join("\n");
         let ns = catalog.create_namespace("ns").await;
         let sequencer = ns.create_sequencer(1).await;
         let table = ns.create_table("table").await;
+        table.create_column("tag1", ColumnType::Tag).await;
+        table.create_column("field_int", ColumnType::I64).await;
+        table.create_column("time", ColumnType::Time).await;
 
         // One parquet file
         let partition = table
@@ -1191,9 +1195,7 @@ mod tests {
             .unwrap();
 
         // should have 2 non-deleted level_0 files. The original file was marked deleted and not counted
-        let mut files = catalog
-            .list_by_table_not_to_delete_with_metadata(table.table.id)
-            .await;
+        let mut files = catalog.list_by_table_not_to_delete(table.table.id).await;
         assert_eq!(files.len(), 2);
         // 2 newly created level-1 files as the result of compaction
         assert_eq!((files[0].id.get(), files[0].compaction_level), (2, 1));
@@ -1217,11 +1219,11 @@ mod tests {
 
         // ------------------------------------------------
         // Verify the parquet file content
-        let parquet_storage = ParquetStorage::new(catalog.object_store());
+
         // query the chunks
         // most recent compacted second half (~10%)
         let files1 = files.pop().unwrap();
-        let batches = read_parquet_file(&parquet_storage, files1).await;
+        let batches = read_parquet_file(&catalog, files1).await;
         assert_batches_sorted_eq!(
             &[
                 "+-----------+------+-----------------------------+",
@@ -1234,7 +1236,7 @@ mod tests {
         );
         // least recent compacted first half (~90%)
         let files2 = files.pop().unwrap();
-        let batches = read_parquet_file(&parquet_storage, files2).await;
+        let batches = read_parquet_file(&catalog, files2).await;
         assert_batches_sorted_eq!(
             &[
                 "+-----------+------+-----------------------------+",
@@ -1257,37 +1259,42 @@ mod tests {
 
         // lp1 does not overlap with any
         let lp1 = vec![
-            "table,tag1=WA field_int=1000 10",
-            "table,tag1=VT field_int=10 20",
+            "table,tag1=WA field_int=1000i 10",
+            "table,tag1=VT field_int=10i 20",
         ]
         .join("\n");
 
         // lp2 overlaps with lp3
         let lp2 = vec![
-            "table,tag1=WA field_int=1000 8000", // will be eliminated due to duplicate
-            "table,tag1=VT field_int=10 10000",  // will be deleted by ts2
-            "table,tag1=UT field_int=70 20000",
+            "table,tag1=WA field_int=1000i 8000", // will be eliminated due to duplicate
+            "table,tag1=VT field_int=10i 10000",  // will be deleted by ts2
+            "table,tag1=UT field_int=70i 20000",
         ]
         .join("\n");
 
         // lp3 overlaps with lp2
         let lp3 = vec![
-            "table,tag1=WA field_int=1500 8000", // latest duplicate and kept
-            "table,tag1=VT field_int=10 6000",
-            "table,tag1=UT field_int=270 25000",
+            "table,tag1=WA field_int=1500i 8000", // latest duplicate and kept
+            "table,tag1=VT field_int=10i 6000",
+            "table,tag1=UT field_int=270i 25000",
         ]
         .join("\n");
 
         // lp4 does not overlapp with any
         let lp4 = vec![
-            "table,tag2=WA,tag3=10 field_int=1600 28000",
-            "table,tag2=VT,tag3=20 field_int=20 26000",
+            "table,tag2=WA,tag3=10 field_int=1600i 28000",
+            "table,tag2=VT,tag3=20 field_int=20i 26000",
         ]
         .join("\n");
 
         let ns = catalog.create_namespace("ns").await;
         let sequencer = ns.create_sequencer(1).await;
         let table = ns.create_table("table").await;
+        table.create_column("tag1", ColumnType::Tag).await;
+        table.create_column("tag2", ColumnType::Tag).await;
+        table.create_column("tag3", ColumnType::Tag).await;
+        table.create_column("field_int", ColumnType::I64).await;
+        table.create_column("time", ColumnType::Time).await;
         let partition = table
             .with_sequencer(&sequencer)
             .create_partition("part")
@@ -1397,9 +1404,7 @@ mod tests {
             .unwrap();
 
         // Should have 3 non-soft-deleted files: pf1 not compacted and stay, and 2 newly created after compacting pf2, pf3, pf4
-        let mut files = catalog
-            .list_by_table_not_to_delete_with_metadata(table.table.id)
-            .await;
+        let mut files = catalog.list_by_table_not_to_delete(table.table.id).await;
         assert_eq!(files.len(), 3);
         // pf1 upgraded to level 1
         assert_eq!((files[0].id.get(), files[0].compaction_level), (1, 1));
@@ -1420,11 +1425,10 @@ mod tests {
 
         // ------------------------------------------------
         // Verify the parquet file content
-        let parquet_storage = ParquetStorage::new(catalog.object_store());
         // query the chunks
         // most recent compacted second half (~10%)
         let files1 = files.pop().unwrap();
-        let batches = read_parquet_file(&parquet_storage, files1).await;
+        let batches = read_parquet_file(&catalog, files1).await;
         assert_batches_sorted_eq!(
             &[
                 "+-----------+------+------+------+-----------------------------+",
@@ -1438,7 +1442,7 @@ mod tests {
         );
         // least recent compacted first half (~90%)
         let files2 = files.pop().unwrap();
-        let batches = read_parquet_file(&parquet_storage, files2).await;
+        let batches = read_parquet_file(&catalog, files2).await;
         assert_batches_sorted_eq!(
             &[
                 "+-----------+------+------+------+-----------------------------+",
@@ -1454,7 +1458,7 @@ mod tests {
         );
         // this is the level 1 data again
         let files3 = files.pop().unwrap();
-        let batches = read_parquet_file(&parquet_storage, files3).await;
+        let batches = read_parquet_file(&catalog, files3).await;
         assert_batches_sorted_eq!(
             &[
                 "+-----------+------+--------------------------------+",
@@ -3173,13 +3177,32 @@ mod tests {
         assert_eq!(num_rows, 1499);
     }
 
-    async fn read_parquet_file(
-        storage: &ParquetStorage,
-        file: ParquetFileWithMetadata,
-    ) -> Vec<RecordBatch> {
-        let decoded_parquet_file = DecodedParquetFile::new(file);
-        let schema = decoded_parquet_file.schema();
-        let path: ParquetFilePath = (&decoded_parquet_file.iox_metadata).into();
+    async fn read_parquet_file(catalog: &TestCatalog, file: ParquetFile) -> Vec<RecordBatch> {
+        let storage = ParquetStorage::new(catalog.object_store());
+
+        // get schema
+        let mut repos = catalog.catalog().repositories().await;
+        let namespace_schema = get_schema_by_id(file.namespace_id, repos.as_mut())
+            .await
+            .unwrap();
+        let table_name = repos
+            .tables()
+            .get_by_id(file.table_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .name;
+        let table_schema: Schema = namespace_schema
+            .tables
+            .get(&table_name)
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap();
+        let selection: Vec<_> = file.column_set.iter().map(|s| s.as_str()).collect();
+        let schema = table_schema.select_by_names(&selection).unwrap();
+
+        let path: ParquetFilePath = (&file).into();
         let rx = storage.read_all(schema.as_arrow(), &path).unwrap();
         datafusion::physical_plan::common::collect(rx)
             .await
