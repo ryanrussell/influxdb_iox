@@ -2,13 +2,12 @@
 
 use crate::query::QueryableParquetChunk;
 use data_types::{
-    ParquetFileId, ParquetFileParams, ParquetFileWithMetadata, PartitionId, Timestamp, Tombstone,
-    TombstoneId,
+    ParquetFile, ParquetFileId, ParquetFileParams, PartitionId, Timestamp, Tombstone, TombstoneId,
 };
 use datafusion::physical_plan::SendableRecordBatchStream;
 use observability_deps::tracing::*;
 use parquet_file::{
-    chunk::{ParquetChunk},
+    chunk::ParquetChunk,
     metadata::{IoxMetadata, IoxParquetMetaData},
     storage::ParquetStorage,
 };
@@ -39,7 +38,7 @@ impl GroupWithTombstones {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupWithMinTimeAndSize {
     /// Parquet files and their metadata
-    pub(crate) parquet_files: Vec<ParquetFileWithMetadata>,
+    pub(crate) parquet_files: Vec<ParquetFile>,
 
     /// min time of all parquet_files
     pub(crate) min_time: Timestamp,
@@ -52,12 +51,12 @@ pub struct GroupWithMinTimeAndSize {
 #[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct ParquetFileWithTombstone {
-    data: Arc<ParquetFileWithMetadata>,
+    data: Arc<ParquetFile>,
     tombstones: Vec<Tombstone>,
 }
 
 impl std::ops::Deref for ParquetFileWithTombstone {
-    type Target = Arc<ParquetFileWithMetadata>;
+    type Target = Arc<ParquetFile>;
 
     fn deref(&self) -> &Self::Target {
         &self.data
@@ -65,8 +64,8 @@ impl std::ops::Deref for ParquetFileWithTombstone {
 }
 
 impl ParquetFileWithTombstone {
-    /// Pair a [`ParquetFileWithMetadata`] with the specified [`Tombstone`] instances.
-    pub fn new(data: Arc<ParquetFileWithMetadata>, tombstones: Vec<Tombstone>) -> Self {
+    /// Pair a [`ParquetFile`] with the specified [`Tombstone`] instances.
+    pub fn new(data: Arc<ParquetFile>, tombstones: Vec<Tombstone>) -> Self {
         Self { data, tombstones }
     }
 
@@ -112,24 +111,21 @@ impl ParquetFileWithTombstone {
         partition_sort_key: Option<SortKey>,
     ) -> QueryableParquetChunk {
         let selection: Vec<_> = self.column_set.iter().map(|s| s.as_str()).collect();
-        let schema = table_schema.select_by_names(&selection).expect("schema in-sync");
+        let schema = table_schema
+            .select_by_names(&selection)
+            .expect("schema in-sync");
         let pk = schema.primary_key();
         let sort_key = partition_sort_key.as_ref().map(|sk| sk.filter_to(&pk));
 
-        let parquet_file = self.data.as_ref().clone().split_off_metadata().0;
-        let parquet_chunk = ParquetChunk::new(
-            Arc::new(parquet_file.clone()),
-            Arc::new(schema),
-            store,
-        );
+        let parquet_chunk = ParquetChunk::new(Arc::clone(&self.data), Arc::new(schema), store);
 
         trace!(
-            parquet_file_id=?parquet_file.id,
-            parquet_file_sequencer_id=?parquet_file.sequencer_id,
-            parquet_file_namespace_id=?parquet_file.namespace_id,
-            parquet_file_table_id=?parquet_file.table_id,
-            parquet_file_partition_id=?parquet_file.partition_id,
-            parquet_file_object_store_id=?parquet_file.object_store_id,
+            parquet_file_id=?self.id,
+            parquet_file_sequencer_id=?self.sequencer_id,
+            parquet_file_namespace_id=?self.namespace_id,
+            parquet_file_table_id=?self.table_id,
+            parquet_file_partition_id=?self.partition_id,
+            parquet_file_object_store_id=?self.object_store_id,
             "built parquet chunk from metadata"
         );
 
