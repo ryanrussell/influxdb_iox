@@ -8,11 +8,11 @@ use data_types::{
 use datafusion::physical_plan::SendableRecordBatchStream;
 use observability_deps::tracing::*;
 use parquet_file::{
-    chunk::{DecodedParquetFile, ParquetChunk},
+    chunk::{ParquetChunk},
     metadata::{IoxMetadata, IoxParquetMetaData},
     storage::ParquetStorage,
 };
-use schema::sort::SortKey;
+use schema::{sort::SortKey, Schema};
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -108,24 +108,28 @@ impl ParquetFileWithTombstone {
         &self,
         store: ParquetStorage,
         table_name: String,
+        table_schema: &Schema,
         partition_sort_key: Option<SortKey>,
     ) -> QueryableParquetChunk {
-        let decoded_parquet_file = DecodedParquetFile::new((*self.data).clone());
-        let sort_key = decoded_parquet_file.sort_key().cloned();
+        let selection: Vec<_> = self.column_set.iter().map(|s| s.as_str()).collect();
+        let schema = table_schema.select_by_names(&selection).expect("schema in-sync");
+        let pk = schema.primary_key();
+        let sort_key = partition_sort_key.as_ref().map(|sk| sk.filter_to(&pk));
 
+        let parquet_file = self.data.as_ref().clone().split_off_metadata().0;
         let parquet_chunk = ParquetChunk::new(
-            Arc::new(decoded_parquet_file.parquet_file.clone()),
-            decoded_parquet_file.schema(),
+            Arc::new(parquet_file.clone()),
+            Arc::new(schema),
             store,
         );
 
         trace!(
-            parquet_file_id=?decoded_parquet_file.parquet_file.id,
-            parquet_file_sequencer_id=?decoded_parquet_file.parquet_file.sequencer_id,
-            parquet_file_namespace_id=?decoded_parquet_file.parquet_file.namespace_id,
-            parquet_file_table_id=?decoded_parquet_file.parquet_file.table_id,
-            parquet_file_partition_id=?decoded_parquet_file.parquet_file.partition_id,
-            parquet_file_object_store_id=?decoded_parquet_file.parquet_file.object_store_id,
+            parquet_file_id=?parquet_file.id,
+            parquet_file_sequencer_id=?parquet_file.sequencer_id,
+            parquet_file_namespace_id=?parquet_file.namespace_id,
+            parquet_file_table_id=?parquet_file.table_id,
+            parquet_file_partition_id=?parquet_file.partition_id,
+            parquet_file_object_store_id=?parquet_file.object_store_id,
             "built parquet chunk from metadata"
         );
 
