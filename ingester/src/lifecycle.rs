@@ -305,10 +305,7 @@ impl PersistState {
 impl LifecycleState {
     /// remove this partition from the current partition stats. Does not adjust `outstanding_persists`
     fn remove(&mut self, partition_id: &PartitionId) -> Option<PartitionLifecycleStats> {
-        self.partition_stats.remove(partition_id).map(|stats| {
-            self.total_bytes -= stats.bytes_written;
-            stats
-        })
+        self.partition_stats.remove(partition_id)
     }
 }
 
@@ -477,14 +474,26 @@ impl LifecycleManager {
         let persist_tasks: Vec<_> = to_persist
             .into_iter()
             .map(|s| {
-                self.mark_persisting(s.partition_id);
+                // Mark this partition as being persisted, and remember the
+                // memory allocation it had accumulated.
+                let partition_memory_usage = self
+                    .mark_persisting(s.partition_id)
+                    .map(|s| s.bytes_written)
+                    .unwrap_or_default();
+
                 let persister = Arc::clone(persister);
 
                 let (_tracker, registration) = self.job_registry.register(Job::Persist {
                     partition_id: s.partition_id,
                 });
+
+                let state = Arc::clone(&self.state);
                 tokio::task::spawn(async move {
                     persister.persist(s.partition_id).await;
+                    // Now the data has been uploaded and the memory it was
+                    // using has been freed, released the memory capacity back
+                    // the ingester.
+                    state.lock().total_bytes -= partition_memory_usage;
                 })
                 .track(registration)
             })
@@ -539,11 +548,10 @@ impl LifecycleManager {
     }
 
     /// Removes the partition from the state and marks it persisting
-    fn mark_persisting(&self, partition_id: PartitionId) {
+    fn mark_persisting(&self, partition_id: PartitionId) -> Option<PartitionLifecycleStats> {
         let mut s = self.state.lock();
-        s.remove(&partition_id);
-
         s.persist_state = s.persist_state.persist();
+        s.remove(&partition_id)
     }
 
     /// clears all outstanding persisting marks
@@ -762,8 +770,8 @@ mod tests {
         assert_eq!(p2.first_write, Time::from_timestamp_nanos(10));
     }
 
-    #[test]
-    fn pausing_and_resuming_ingest() {
+    #[tokio::test]
+    async fn pausing_and_resuming_ingest() {
         let config = LifecycleConfig {
             pause_ingest_size: 20,
             persist_memory_threshold: 10,
@@ -771,29 +779,71 @@ mod tests {
             partition_age_threshold: Duration::from_nanos(0),
             partition_cold_threshold: Duration::from_secs(500),
         };
-        let TestLifecycleManger { m, .. } = TestLifecycleManger::new(config);
+        let partition_id = PartitionId::new(1);
+        let TestLifecycleManger { mut m, .. } = TestLifecycleManger::new(config);
         let sequencer_id = SequencerId::new(1);
         let h = m.handle();
 
-        assert!(!h.log_write(
-            PartitionId::new(1),
-            sequencer_id,
-            SequenceNumber::new(1),
-            15
-        ));
+        // write more than the limit (10)
+        assert!(!h.log_write(partition_id, sequencer_id, SequenceNumber::new(1), 15));
 
-        // now it should indicate a pause
-        assert!(h.log_write(
-            PartitionId::new(1),
-            sequencer_id,
-            SequenceNumber::new(2),
-            10
-        ));
+        // all subsequent writes should also indicate a pause
+        assert!(h.log_write(partition_id, sequencer_id, SequenceNumber::new(2), 10));
         assert!(!h.can_resume_ingest());
 
-        m.mark_persisting(PartitionId::new(1));
+        // persist the partition
+        let persister = Arc::new(TestPersister::default());
+        m.maybe_persist(&persister).await;
+
+        // ingest can resume
         assert!(h.can_resume_ingest());
-        assert!(!h.log_write(PartitionId::new(1), sequencer_id, SequenceNumber::new(3), 3));
+        assert!(!h.log_write(partition_id, sequencer_id, SequenceNumber::new(3), 3));
+    }
+
+    #[tokio::test]
+    async fn pausing_ingest_waits_until_persist_completes() {
+        let config = LifecycleConfig {
+            pause_ingest_size: 20,
+            persist_memory_threshold: 10,
+            partition_size_threshold: 5,
+            partition_age_threshold: Duration::from_nanos(0),
+            partition_cold_threshold: Duration::from_secs(500),
+        };
+        let partition_id = PartitionId::new(1);
+        let TestLifecycleManger { mut m, .. } = TestLifecycleManger::new(config);
+        let sequencer_id = SequencerId::new(1);
+        let h = m.handle();
+
+        // write more than the limit (20)
+        h.log_write(partition_id, sequencer_id, SequenceNumber::new(1), 25);
+
+        // can not resume ingest as we are overall the pause ingest limit
+        assert!(!h.can_resume_ingest());
+
+        // persist the partition, pausing once it starts
+        let persister = Arc::new(PausablePersister::new());
+        persister.pause_next(partition_id);
+
+        let captured_persister = Arc::clone(&persister);
+        let persist = tokio::task::spawn(async move {
+            m.maybe_persist(&captured_persister).await;
+            m
+        });
+
+        // wait for persist to have started
+        persister.wait_for_persist(partition_id).await;
+
+        // until persist completes, ingest can not proceed (as the
+        // ingester is still over the limit).
+        assert!(!h.can_resume_ingest());
+
+        // allow persist to complete
+        persister.complete_persist(partition_id).await;
+        persist.await.expect("task panic'd");
+
+        // ingest can resume
+        assert!(h.can_resume_ingest());
+        assert!(!h.log_write(partition_id, sequencer_id, SequenceNumber::new(2), 3));
     }
 
     #[tokio::test]
